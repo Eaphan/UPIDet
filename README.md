@@ -4,7 +4,7 @@
 
 <img src="docs/pipeline.png">
 
-This is the official implementation of "Bidirectional Propagation for Cross-Modal 3D Object Detection" [`[paper]`](https://openreview.net/forum?id=gYs_cRuK7V&referrer=%5BAuthor%20Console%5D(%2Fgroup%3Fid%3DICLR.cc%2F2023%2FConference%2FAuthors%23your-submissions)). This repository is based off [`[OpenPCDet]`](https://github.com/open-mmlab/OpenPCDet).
+This is the official implementation of "Bidirectional Propagation for Cross-Modal 3D Object Detection" [`[paper]`](https://openreview.net/forum?id=gYs_cRuK7V&referrer=%5BAuthor%20Console%5D(%2Fgroup%3Fid%3DICLR.cc%2F2023%2FConference%2FAuthors%23your-submissions)). This repository is based on [`[OpenPCDet]`](https://github.com/open-mmlab/OpenPCDet).
 
 
 ## Overview
@@ -96,18 +96,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4  --cfg_file ./cfgs/kitt
 Thanks for the OpenPCDet, the implementation of probabilistic object detectors part is mainly based on the pcdet v0.5.2.
 
 
-<!-- ## Citation 
-If you find this project useful in your research, please consider cite:
-
-
+## Citation
+If you find this work useful in your research, please consider cite:
 ```
-@misc{openpcdet2020,
-    title={OpenPCDet: An Open-source Toolbox for 3D Object Detection from Point Clouds},
-    author={OpenPCDet Development Team},
-    howpublished = {\url{https://github.com/open-mmlab/OpenPCDet}},
-    year={2020}
+@inproceedings{
+    zhang2023bidirectional,
+    title={Bidirectional Propagation for Cross-Modal 3D Object Detection},
+    author={Yifan Zhang and Qijian Zhang and Junhui Hou and Yixuan Yuan and Guoliang Xing},
+    booktitle={International Conference on Learning Representations},
+    year={2023}
 }
-``` -->
+```
 
 
 ![visitors](https://visitor-badge.glitch.me/badge?page_id=Eaphan/BiProDet)
