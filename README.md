@@ -1,6 +1,6 @@
 <!-- <img src="docs/open_mmlab.png" align="right" width="30%"> -->
 
-# Bidirectional Propagation for Cross-Modal 3D Object Detection (ICLR2023)
+# Bidirectional Propagation for Cross-Modal 3D Object Detection
 
 <img src="docs/pipeline.png">
 
