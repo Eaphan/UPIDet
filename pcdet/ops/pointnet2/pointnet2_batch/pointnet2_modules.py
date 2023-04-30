@@ -733,7 +733,7 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
             Conv2dBlock(in_channels_3d, in_channels_3d),
             Conv2dBlock(in_channels_3d, in_channels_3d),
         )
-        self.fuse2d_conv = Conv2dBlock(in_channels_2d + in_channels_3d, in_channels_2d, norm=None)
+        self.fuse2d_conv = Conv2dBlock(in_channels_2d + in_channels_3d, in_channels_2d)
 
 
     def forward(self,
@@ -1063,7 +1063,7 @@ class PointnetFPModuleWithImage(nn.Module):
             Conv2dBlock(in_channels_3d, in_channels_3d),
             Conv2dBlock(in_channels_3d, in_channels_3d),
         )
-        self.fuse2d_conv = Conv2dBlock(in_channels_2d + in_channels_3d, in_channels_2d, norm=None)
+        self.fuse2d_conv = Conv2dBlock(in_channels_2d + in_channels_3d, in_channels_2d)
 
 
     def forward(self,

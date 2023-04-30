@@ -508,31 +508,68 @@ class GroupAll(nn.Module):
 
 
 class Conv2dBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn'):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='relu'):
         super().__init__()
-        self.conv_fn = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
-        if norm is not None:
-            self.norm_fn = nn.BatchNorm2d(out_channels)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
+        
+        if norm == 'bn':
+            self.norm = nn.BatchNorm2d(out_channels)
+        elif norm == 'instance':
+            self.norm = nn.InstanceNorm2d(out_channels)
+        elif norm == 'ln':
+            self.norm = LayerNorm(out_channels)
+        elif norm == 'adap':
+            self.norm = AdaptiveInstanceNorm2d(out_channels)
         else:
-            self.norm_fn = None
-        self.relu_fn = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+            raise NotImplementedError
+
+        # initialize activation
+        if activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'lrelu':
+            self.activation = nn.LeakyReLU()
+        elif activation == 'prelu':
+            self.activation = nn.PReLU()
+        elif activation == 'selu':
+            self.activation = nn.SELU()
+        else:
+            raise NotImplementedError
 
     def forward(self, x):
-        x = self.conv_fn(x)
-        if self.norm_fn is not None:
-            x = self.norm_fn(x)
-        x = self.relu_fn(x)
+        x = self.conv(x)
+        x = self.norm(x)
+        x = self.activation(x)
         return x
 
 class Conv1dBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='relu'):
         super().__init__()
-        self.conv_fn = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
-        self.norm_fn = nn.BatchNorm1d(out_channels)
-        self.relu_fn = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
+        if norm == 'bn':
+            self.norm = nn.BatchNorm2d(out_channels)
+        elif norm == 'instance':
+            self.norm = nn.InstanceNorm2d(out_channels)
+        elif norm == 'ln':
+            self.norm = LayerNorm(out_channels)
+        elif norm == 'adap':
+            self.norm = AdaptiveInstanceNorm2d(out_channels)
+        else:
+            raise NotImplementedError
+
+        # initialize activation
+        if activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'lrelu':
+            self.activation = nn.LeakyReLU()
+        elif activation == 'prelu':
+            self.activation = nn.PReLU()
+        elif activation == 'selu':
+            self.activation = nn.SELU()
+        else:
+            raise NotImplementedError
 
     def forward(self, x):
         x = self.conv_fn(x)
-        x = self.norm_fn(x)
-        x = self.relu_fn(x)
+        x = self.norm(x)
+        x = self.activation(x)
         return x
