@@ -93,9 +93,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4  --cfg_file ./cfgs/kitt
 `BiProDet` is released under the [Apache 2.0 license](LICENSE).
 
 ## Acknowledgement
-Thanks for the OpenPCDet, the implementation of probabilistic object detectors part is mainly based on the pcdet v0.5.2.
-
-
+Thanks for the OpenPCDet, the implementation of probabilistic object detectors part is mainly based on the pcdet v0.5.2. Thanks for haisong's contribution in CamLiFlow, we referred to his repo when writing our code.
 
 
 

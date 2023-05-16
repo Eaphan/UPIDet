@@ -1,3 +1,5 @@
+# CopyRight @ Haisong Liu
+# Thanks for Haisong's contribution in https://github.com/MCG-NJU/CamLiFlow
 import torch
 import torch.nn.functional
 

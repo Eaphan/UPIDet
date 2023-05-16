@@ -1,3 +1,5 @@
+# Thanks for Haisong's contribution in https://github.com/MCG-NJU/CamLiFlow, we referred to his repo when writing this code.
+
 from typing import List
 
 import torch
@@ -6,7 +8,6 @@ import torch.nn.functional as F
 
 from .pointnet2_utils import Conv1dBlock, Conv2dBlock 
 from . import pointnet2_utils
-from pcdet.ops.k_nearest_neighbor.k_nearest_neighbor_utils import k_nearest_neighbor
 from pcdet.utils import common_utils
 
 
