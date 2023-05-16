@@ -28,7 +28,7 @@ Here we present the 3D detection performance of moderate difficulty on the *val*
 
 |                                             | training time | Car@R40 | Pedestrian@R40 | Cyclist@R40   | download |
 |---------------------------------------------|:----------:|:-------:|:-------:|:-------:|:---------:|
-| [BiProDet](tools/cfgs/kitti_models/biprodet.yaml) |~8 hours| 86.21 | 67.87 | 76.17 | [model-286M](https://drive.google.com/file/d/1E2eA1_jeuvOF2XCC_orD9y93QbSaPSgy/view?usp=sharing) |
+| [BiProDet](tools/cfgs/kitti_models/biprodet.yaml) |~8 hours| 86.21 | 67.87 | 76.17 | [model-286M](https://drive.google.com/file/d/1E2eA1_jeuvOF2XCC_orD9y93QbSaPSgy/view?usp=sharing) (to be updated) |
 
 ## Getting Started
 
@@ -93,7 +93,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4  --cfg_file ./cfgs/kitt
 `BiProDet` is released under the [Apache 2.0 license](LICENSE).
 
 ## Acknowledgement
-Thanks for the OpenPCDet, the implementation of probabilistic object detectors part is mainly based on the pcdet v0.5.2. Thanks for haisong's contribution in CamLiFlow, we referred to his repo when writing our code.
+Thanks for the OpenPCDet, the implementation of cross-modal object detectors part is mainly based on the pcdet v0.5.2. BTW, we rewrite the multimodal simultaneous copy&paste data augmentation. Thanks for haisong's contribution in CamLiFlow, we referred to his repo when writing our code.
 
 
 
