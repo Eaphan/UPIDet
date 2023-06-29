@@ -571,7 +571,7 @@ class Conv1dBlock(nn.Module):
             raise NotImplementedError
 
     def forward(self, x):
-        x = self.conv_fn(x)
+        x = self.conv(x)
         x = self.norm(x)
         x = self.activation(x)
         return x
