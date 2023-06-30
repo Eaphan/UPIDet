@@ -548,13 +548,13 @@ class Conv1dBlock(nn.Module):
         super().__init__()
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
         if norm == 'bn':
-            self.norm = nn.BatchNorm2d(out_channels)
+            self.norm = nn.BatchNorm1d(out_channels)
         elif norm == 'instance':
-            self.norm = nn.InstanceNorm2d(out_channels)
+            self.norm = nn.InstanceNorm1d(out_channels)
         elif norm == 'ln':
             self.norm = LayerNorm(out_channels)
         elif norm == 'adap':
-            self.norm = AdaptiveInstanceNorm2d(out_channels)
+            self.norm = AdaptiveInstanceNorm1d(out_channels)
         else:
             raise NotImplementedError
 
