@@ -118,14 +118,6 @@ if __name__ == '__main__':
                     'src/sampling_gpu.cu',
 
                 ],
-            ),
-            make_cuda_ext(
-                name='_k_nearest_neighbor_cuda',
-                module='pcdet.ops.k_nearest_neighbor',
-                sources=[
-                    'src/k_nearest_neighbor.cpp',
-                    'src/k_nearest_neighbor_kernel.cu'
-                ]
             )
         ],
     )

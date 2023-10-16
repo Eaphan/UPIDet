@@ -1,10 +1,11 @@
 <!-- <img src="docs/open_mmlab.png" align="right" width="30%"> -->
 
-# Bidirectional Propagation for Cross-Modal 3D Object Detection
+# Unleash the Potential of Image Branch for Cross-modal 3D Object Detection
+This is the official implementation of "Unleash the Potential of Image Branch for Cross-modal 3D Object Detection". This repository is based on [`[OpenPCDet]`](https://github.com/open-mmlab/OpenPCDet).
 
-<img src="docs/pipeline.png">
+<!-- <img src="docs/pipeline.png"> -->
+**Abstract**: To achieve reliable and precise scene understanding, autonomous vehicles typically incorporate multiple sensing modalities to capitalize on their complementary attributes. However, existing cross-modal 3D detectors do not fully utilize the image domain information to address the bottleneck issues of the LiDAR-based detectors. This paper presents a new cross-modal 3D object detector, namely UPIDet, which aims to unleash the potential of the image branch from two aspects. First, UPIDet introduces a new 2D auxiliary task called normalized local coordinate map estimation. This approach enables the learning of local spatial-aware features from the image modality to supplement sparse point clouds. Second, we discover that the representational capability of the point cloud backbone can be enhanced through the gradients backpropagated from the training objectives of the image branch, utilizing a succinct and effective point-to-pixel module. Extensive experiments and ablation studies validate the effectiveness of our method. Notably, we achieved the top rank in the highly competitive cyclist class of the KITTI benchmark at the time of submission. 
 
-This is the official implementation of "Bidirectional Propagation for Cross-Modal 3D Object Detection". This repository is based on [`[OpenPCDet]`](https://github.com/open-mmlab/OpenPCDet).
 
 
 ## Overview
@@ -28,7 +29,7 @@ Here we present the 3D detection performance of moderate difficulty on the *val*
 
 |                                             | training time | Car@R40 | Pedestrian@R40 | Cyclist@R40   | download |
 |---------------------------------------------|:----------:|:-------:|:-------:|:-------:|:---------:|
-| [BiProDet](tools/cfgs/kitti_models/biprodet.yaml) |~8 hours| 86.21 | 67.87 | 76.17 | [model-286M](https://drive.google.com/file/d/1E2eA1_jeuvOF2XCC_orD9y93QbSaPSgy/view?usp=sharing) (to be updated) |
+| [UPIDet](tools/cfgs/kitti_models/upidet.yaml) |~12 hours| 86.10 | 68.67 | 76.70 | [model-287M](https://drive.google.com/file/d/1clUCPAixSAAad5aSH08zJr32-8o--P0u/view?usp=sharing) |
 
 ## Getting Started
 
@@ -59,12 +60,12 @@ Especially, for the 2D auxiliary task of semantic segmentation, we used the inst
 ### Training
 ```
 cd tools;
-python train.py --cfg_file ./cfgs/kitti_models/biprodet.yaml
+python train.py --cfg_file ./cfgs/kitti_models/upidet.yaml
 ```
 Multi gpu training, assuming you have 4 gpus:
 
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_train.sh 4 --cfg_file ./cfgs/kitti_models/biprodet.yaml
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_train.sh 4 --cfg_file ./cfgs/kitti_models/upidet.yaml
 
 ```
 ### Testing
@@ -73,28 +74,42 @@ cd tools/
 ```
 Single gpu testing for all saved checkpoints, assuming you have 4 gpus:
 ```
-python test.py --eval_all --cfg_file ./cfgs/kitti_models/biprodet.yaml
+python test.py --eval_all --cfg_file ./cfgs/kitti_models/upidet.yaml
 ```
 
 Multi gpu testing for all saved checkpoints, assuming you have 4 gpus:
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4 --eval_all --cfg_file ./cfgs/kitti_models/biprodet.yaml
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4 --eval_all --cfg_file ./cfgs/kitti_models/upidet.yaml
 ```
 
 Multi gpu testing a specific checkpoint, assuming you have 4 gpus and checkpoint_39 is your best checkpoint :
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4  --cfg_file ./cfgs/kitti_models/biprodet.yaml --ckpt ../output/biprodet/default/ckpt/checkpoint_epoch_80.pth
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_test.sh 4  --cfg_file ./cfgs/kitti_models/upidet.yaml --ckpt ../output/upidet/default/ckpt/checkpoint_epoch_80.pth
 ```
 
 <!-- ## Pretrained Models -->
 
 ## License
 
-`BiProDet` is released under the [Apache 2.0 license](LICENSE).
+`UPIDet` is released under the [Apache 2.0 license](LICENSE).
 
 ## Acknowledgement
-Thanks for the OpenPCDet, the implementation of cross-modal object detectors part is mainly based on the pcdet v0.5.2. BTW, we rewrite the multimodal simultaneous copy&paste data augmentation. Thanks for haisong's contribution in CamLiFlow, we referred to his repo when writing our code.
+We sincerely appreciate the following open-source projects for providing valuable and high-quality codes:
+- [`OpenPCDet`](https://github.com/open-mmlab/OpenPCDet)
+- [mmdetection3d](https://github.com/open-mmlab/mmdetection3d)
+- [Focalsconv](https://github.com/dvlab-research/FocalsConv)
+- [CamLiFlow](https://github.com/MCG-NJU/CamLiFlow)
+- [mmdetection](https://github.com/open-mmlab/mmdetection)
+- [PDV](https://github.com/TRAILab/PDV)
 
-
-
-![visitors](https://visitor-badge.glitch.me/badge?page_id=Eaphan/BiProDet)
+## Citation
+If you find this work useful in your research, please consider cite:
+```
+@inproceedings{
+    zhang2023upidet,
+    title={Unleash the Potential of Image Branch for Cross-modal 3D Object Detection},
+    author={Yifan Zhang and Qijian Zhang and Junhui Hou and Yixuan Yuan and Guoliang Xing},
+    booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
+    year={2023},
+}
+```

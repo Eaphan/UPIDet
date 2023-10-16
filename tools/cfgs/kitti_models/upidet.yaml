@@ -60,7 +60,7 @@ DATA_CONFIG:
             }
 
 MODEL:
-    NAME: BiProDet
+    NAME: UPIDet
 
     BACKBONE_3D:
         NAME: 3DSSD_Backbone

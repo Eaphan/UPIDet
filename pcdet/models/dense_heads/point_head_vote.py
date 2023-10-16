@@ -750,29 +750,26 @@ class PointHeadVote(PointHeadTemplate):
         })
         return point_loss_cls, tb_dict
 
-    def get_fp_part_layer_loss(self, tb_dict=None):
+    def get_fp_ctr_layer_loss(self, tb_dict=None):
         pos_mask = self.forward_ret_dict['fp_point_cls_labels'] > 0
         pos_normalizer = max(1, (pos_mask > 0).sum().item())
-        point_part_labels = self.forward_ret_dict['fp_point_part_labels']
-        point_part_preds = self.forward_ret_dict['fp_point_part_preds']
-        # import pdb;pdb.set_trace()
-        # point_loss_part = F.binary_cross_entropy(torch.sigmoid(point_part_preds), point_part_labels, reduction='none')
-        # point_loss_part = (point_loss_part.sum(dim=-1) * pos_mask.float()).sum() / (3 * pos_normalizer)
+        point_ctr_labels = self.forward_ret_dict['fp_point_ctr_labels']
+        point_ctr_preds = self.forward_ret_dict['fp_point_ctr_preds']
 
         reg_weights = pos_mask.float()
         pos_normalizer = pos_mask.sum().float()
         reg_weights /= torch.clamp(pos_normalizer, min=1.0)
-        point_loss_part_src = self.reg_loss_func(
-            point_part_preds[None, ...], point_part_labels[None, ...], weights=reg_weights[None, ...]
+        point_loss_ctr_src = self.reg_loss_func(
+            point_ctr_preds[None, ...], point_ctr_labels[None, ...], weights=reg_weights[None, ...]
         )
-        point_loss_part = point_loss_part_src.sum()
+        point_loss_ctr = point_loss_ctr_src.sum()
 
         loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
-        point_loss_part = point_loss_part * loss_weights_dict.get('fp_point_part_weight', 1.0)
+        point_loss_ctr = point_loss_ctr * loss_weights_dict.get('fp_point_part_weight', 1.0)
         if tb_dict is None:
             tb_dict = {}
-        tb_dict.update({'fp_point_loss_part': point_loss_part.item()})
-        return point_loss_part, tb_dict
+        tb_dict.update({'fp_point_loss_ctr': point_loss_ctr.item()})
+        return point_loss_ctr, tb_dict
 
     def get_fp_part_image_layer_loss(self, tb_dict=None):
         pos_mask = self.forward_ret_dict['fp_point_cls_labels'] > 0
@@ -806,7 +803,7 @@ class PointHeadVote(PointHeadTemplate):
         point_loss_box, box_weights, tb_dict_2 = self.get_box_layer_loss()
         segmentation_loss, tb_dict_seg = self.get_segmentation_loss()
         fp_point_loss_cls, tb_dict_fp_cls = self.get_fp_cls_layer_loss()
-        fp_point_loss_part, tb_dict_fp_part = self.get_fp_part_layer_loss()
+        fp_point_loss_part, tb_dict_fp_part = self.get_fp_ctr_layer_loss() # NOTE: it is center estimation loss.
         fp_point_loss_part_image, tb_dict_fp_part_image = self.get_fp_part_image_layer_loss()
 
         point_loss_cls = point_loss_cls.sum() / torch.clamp(cls_weights.sum(), min=1.0)
@@ -890,7 +887,7 @@ class PointHeadVote(PointHeadTemplate):
         ret_dict = {
             'batch_size': batch_size,
             'fp_point_cls_preds': fp_point_cls_preds,
-            'fp_point_part_preds': fp_point_part_preds,
+            'fp_point_ctr_preds': fp_point_part_preds,
             'fp_point_part_image_preds': fp_point_part_image_preds
         }
 
@@ -978,6 +975,7 @@ class PointHeadVote(PointHeadTemplate):
             targets_dict_fp = self.assign_targets_fp(batch_dict)
             ret_dict['fp_point_cls_labels'] = targets_dict_fp['point_cls_labels']
             ret_dict['fp_point_part_labels'] = targets_dict_fp['point_part_labels']
+            ret_dict['fp_point_ctr_labels'] = targets_dict_fp['point_ctr_labels']
 
             targets_dict = self.assign_targets(batch_dict)
             ret_dict['point_cls_labels'] = targets_dict['point_cls_labels']
