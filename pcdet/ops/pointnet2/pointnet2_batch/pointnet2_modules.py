@@ -1,3 +1,5 @@
+# Thanks for Haisong's contribution in https://github.com/MCG-NJU/CamLiFlow, we referred to his repo when writing this code.
+
 from typing import List
 
 import torch
