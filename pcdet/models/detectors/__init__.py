@@ -20,7 +20,7 @@ __all__ = {
     'PVRCNN': PVRCNN,
     'PointPillar': PointPillar,
     'PointRCNN': PointRCNN,
-    'UPIDet': Point3DSSD,
+    '3DSSD': Point3DSSD,
     'PointRPN': PointRPN,
     'SECONDNetIoU': SECONDNetIoU,
     'CaDDN': CaDDN,

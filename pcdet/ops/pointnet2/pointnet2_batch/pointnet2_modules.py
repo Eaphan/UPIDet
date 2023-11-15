@@ -1,14 +1,59 @@
-# Thanks for Haisong's contribution in https://github.com/MCG-NJU/CamLiFlow, we referred to his repo when writing this code.
-
 from typing import List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .pointnet2_utils import Conv1dBlock, Conv2dBlock 
+from .pointnet2_utils import Conv1dNormRelu, Conv2dNormRelu, batch_indexing_channel_first, grid_sample_wrapper
 from . import pointnet2_utils
-from pcdet.utils import common_utils
+from pcdet.ops.k_nearest_neighbor.k_nearest_neighbor_utils import k_nearest_neighbor
+
+def bilinear_interpolate_torch(im, x, y):
+    """
+    Args:
+        im: (H, W, C) [y, x]
+        x: (N)
+        y: (N)
+    Returns:
+    """
+    x0 = torch.floor(x).long()
+    x1 = x0 + 1
+
+    y0 = torch.floor(y).long()
+    y1 = y0 + 1
+
+    x0 = torch.clamp(x0, 0, im.shape[1] - 1)
+    x1 = torch.clamp(x1, 0, im.shape[1] - 1)
+    y0 = torch.clamp(y0, 0, im.shape[0] - 1)
+    y1 = torch.clamp(y1, 0, im.shape[0] - 1)
+
+    Ia = im[y0, x0]
+    Ib = im[y1, x0]
+    Ic = im[y0, x1]
+    Id = im[y1, x1]
+
+    wa = (x1.type_as(x) - x) * (y1.type_as(y) - y)
+    wb = (x1.type_as(x) - x) * (y - y0.type_as(y))
+    wc = (x - x0.type_as(x)) * (y1.type_as(y) - y)
+    wd = (x - x0.type_as(x)) * (y - y0.type_as(y))
+    ans = torch.t((torch.t(Ia) * wa)) + torch.t(torch.t(Ib) * wb) + torch.t(torch.t(Ic) * wc) + torch.t(torch.t(Id) * wd)
+    return ans
+
+def rotate_points_along_z(points, angle):
+    """
+    Args:
+        points: (N, 3 + C)
+        angle: float, angle along z-axis, angle increases x ==> y
+    Returns:
+    """
+    cosa = torch.cos(angle)
+    sina = torch.sin(angle)
+
+    points_rot_x = points[:, 0:1] * cosa - points[:, 1:2] * sina
+    points_rot_y = points[:, 0:1] * sina + points[:, 1:2] * cosa
+    points_rot = torch.cat([points_rot_x, points_rot_y, points[:, 2:3]], axis=1)
+
+    return points_rot
 
 
 class _PointnetSAModuleBase(nn.Module):
@@ -720,9 +765,9 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
 
         # image to points
         self.fuse3d_before_mlps = nn.Sequential(
-            Conv1dBlock(in_channels_2d, in_channels_2d),
-            Conv1dBlock(in_channels_2d, in_channels_2d),
-            Conv1dBlock(in_channels_2d, in_channels_2d),
+            Conv1dNormRelu(in_channels_2d, in_channels_2d, norm='batch_norm'),
+            Conv1dNormRelu(in_channels_2d, in_channels_2d, norm='batch_norm'),
+            Conv1dNormRelu(in_channels_2d, in_channels_2d, norm='batch_norm'),
         )
         self.fuse3d_mlp = nn.Sequential(nn.Conv1d(in_channels_2d + in_channels_3d, in_channels_3d, kernel_size=1, bias=False),
                                     nn.BatchNorm1d(in_channels_3d),
@@ -730,17 +775,16 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
 
         # points to image
         self.fuse2d_mlp = nn.Sequential(
-            Conv2dBlock(in_channels_3d, in_channels_3d),
-            Conv2dBlock(in_channels_3d, in_channels_3d),
-            Conv2dBlock(in_channels_3d, in_channels_3d),
+            Conv2dNormRelu(in_channels_3d + 3, in_channels_3d, norm='batch_norm'),
+            Conv2dNormRelu(in_channels_3d, in_channels_3d, norm='batch_norm'),
+            Conv2dNormRelu(in_channels_3d, in_channels_3d, norm='batch_norm'),
         )
-        self.fuse2d_conv = Conv2dBlock(in_channels_2d + in_channels_3d, in_channels_2d)
+        self.fuse2d_conv = Conv2dNormRelu(in_channels_2d + in_channels_3d, in_channels_2d)
 
 
     def forward(self,
                 xyz: torch.Tensor,
                 features: torch.Tensor = None,
-                vis: torch.Tensor = None,
                 image_features: torch.Tensor = None,
                 new_xyz=None,
                 scores=None,
@@ -764,8 +808,6 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
         new_features_list = []
 
         xyz_flipped = xyz.transpose(1, 2).contiguous()
-        vis_flipped = vis.transpose(1, 2).contiguous()
-        
         if new_xyz is None:
             assert len(self.npoint_list) == len(self.sample_range_list) == len(self.sample_method_list)
             sample_idx_list = []
@@ -797,11 +839,6 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
             sample_idx = torch.cat(sample_idx_list, dim=-1)
             new_xyz = pointnet2_utils.gather_operation(
                 xyz_flipped,
-                sample_idx
-            ).transpose(1, 2).contiguous()  # (B, npoint, 3)
-            # import pdb;pdb.set_trace()
-            new_vis = pointnet2_utils.gather_operation(
-                vis_flipped,
                 sample_idx
             ).transpose(1, 2).contiguous()  # (B, npoint, 3)
             
@@ -846,22 +883,24 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
             uv_list = []
 
             batch_size, _, image_features_h, image_features_w = image_features.shape
+            grid = pointnet2_utils.mesh_grid(batch_size, image_features_h, image_features_w, image_features.device)  # [B, 2, H, W]
+            grid = grid.reshape([batch_size, 2, -1])  # [B, 2, HW]
             
             # import pdb;pdb.set_trace()
             for bs_idx in range(batch_size):
                 keypoints_b = new_xyz[bs_idx].clone()
-                # if self.training:
-                # restore the raw positions of keypoints, seq: scale->rotate->flip?
-                if world_scale is not None:
-                    world_scale_b = world_scale[bs_idx]
-                    keypoints_b /= world_scale_b
-                if world_rotation is not None:
-                    world_rotation_b = world_rotation[bs_idx]
-                    keypoints_b = common_utils.rotate_points_along_z_single(keypoints_b, -world_rotation_b)
-                if flip_along_x is not None:
-                    flip_along_x_b = flip_along_x[bs_idx] # ad hoc, only process flip_x
-                    if flip_along_x_b:
-                        keypoints_b[:, 1] = -keypoints_b[:, 1]
+                if self.training:
+                    # restore the raw positions of keypoints, seq: scale->rotate->flip?
+                    if world_scale is not None:
+                        world_scale_b = world_scale[bs_idx]
+                        keypoints_b /= world_scale_b
+                    if world_rotation is not None:
+                        world_rotation_b = world_rotation[bs_idx]
+                        keypoints_b = rotate_points_along_z(keypoints_b, -world_rotation_b)
+                    if flip_along_x is not None:
+                        flip_along_x_b = flip_along_x[bs_idx] # ad hoc, only process flip_x
+                        if flip_along_x_b:
+                            keypoints_b[:, 1] = -keypoints_b[:, 1]
 
                 # project keypoint to image
                 keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
@@ -885,35 +924,22 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
                 scan_C2[:, 1] *= (image_features[bs_idx].shape[1]/image_shape[0]) # h
                 uv_list.append(scan_C2)
 
-                # cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[:, 0], scan_C2[:, 1])
                 cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
-                valid_mask = new_vis[bs_idx].flatten()
-                cur_point_image_features = torch.zeros((len(valid_mask), cur_image_features.shape[-1]), dtype=cur_image_features.dtype, device=cur_image_features.device)
-                valid_cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[valid_mask==1, 0], scan_C2[valid_mask==1, 1])
-                cur_point_image_features[valid_mask==1, :] = valid_cur_point_image_features
+                cur_point_image_features = bilinear_interpolate_torch(cur_image_features, scan_C2[:, 0], scan_C2[:, 1])
                 point_image_features_list.append(cur_point_image_features)
-
-            feat_3d_to_2d_list = []
-            for bs_idx in range(batch_size):
-                bs_uv = uv_list[bs_idx]
-                bs_uv_grid = torch.floor(bs_uv).int()
-                valid_point_mask = (bs_uv[:, 0]>=0) & (bs_uv[:, 0]<image_features[0].shape[2]) & (bs_uv[:, 1]>=0) & (bs_uv[:, 1]<image_features[0].shape[1])
-
                 # import pdb;pdb.set_trace()
-                valid_point_mask = valid_point_mask & (new_vis[bs_idx]>0).flatten()
 
-                bs_uv_grid = bs_uv_grid[valid_point_mask].transpose(0,1)
-                bs_new_features = new_features[bs_idx].transpose(0,1)[valid_point_mask, :]
-                mask_value = torch.ones([bs_new_features.shape[0],1], device=bs_new_features.device)
+            xy = torch.stack(uv_list).permute(0,2,1).contiguous()
+            # todo import k_nearest_neighbor
+            # import pdb;pdb.set_trace()
+            nn_indices = k_nearest_neighbor(xy, grid, 1)[..., 0]  # [B, HW]
+            nn_feat2d = batch_indexing_channel_first(grid_sample_wrapper(image_features, xy), nn_indices)  # [B, n_channels_2d, HW]
+            nn_feat3d = batch_indexing_channel_first(new_features, nn_indices)  # [B, n_channels_3d, HW]
+            nn_offset = batch_indexing_channel_first(xy, nn_indices) - grid  # [B, 2, HW]
+            nn_corr = torch.mean(nn_feat2d * image_features.reshape(batch_size, -1, image_features_h * image_features_w), dim=1, keepdim=True)  # [B, 1, HW]
 
-                gather_3d_features = torch.sparse_coo_tensor(bs_uv_grid, bs_new_features, (image_features_w, image_features_h, new_features.shape[1]))
-                gather_3d_features = gather_3d_features.to_dense()
-                gather_counts = torch.sparse_coo_tensor(bs_uv_grid, mask_value, (image_features_w, image_features_h, 1))
-                gather_counts = gather_counts.to_dense()
-                bs_feat_3d_to_2d = gather_3d_features / (gather_counts + 1e-6) # (w,h,c)
-                feat_3d_to_2d_list.append(bs_feat_3d_to_2d)
-
-            feat_3d_to_2d = torch.stack(feat_3d_to_2d_list).permute(0,3,2,1)            
+            feat_3d_to_2d = torch.cat([nn_offset, nn_corr, nn_feat3d], dim=1)  # [B, n_channels_3d + 3, HW]
+            feat_3d_to_2d = feat_3d_to_2d.reshape([batch_size, -1, image_features_h, image_features_w])
 
             feat_3d_to_2d = self.fuse2d_mlp(feat_3d_to_2d)
             new_image_features = self.fuse2d_conv(torch.cat([feat_3d_to_2d, image_features], dim=1))
@@ -928,9 +954,9 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
         if self.confidence_mlp is not None:
             new_scores = self.confidence_mlp(new_features)
             new_scores = new_scores.squeeze(1)  # (B, npoint)
-            return new_xyz, new_features, new_vis, new_scores, new_image_features
+            return new_xyz, new_features, new_scores, new_image_features
 
-        return new_xyz, new_features, new_vis, None, new_image_features
+        return new_xyz, new_features, None, new_image_features
 
 
 class PointnetSAModuleFS(PointnetSAModuleFSMSG):
@@ -1049,9 +1075,9 @@ class PointnetFPModuleWithImage(nn.Module):
 
         # image to points
         self.fuse3d_before_mlps = nn.Sequential(
-            Conv1dBlock(in_channels_2d, in_channels_2d),
-            Conv1dBlock(in_channels_2d, in_channels_2d),
-            Conv1dBlock(in_channels_2d, in_channels_2d),
+            Conv1dNormRelu(in_channels_2d, in_channels_2d, norm='batch_norm'),
+            Conv1dNormRelu(in_channels_2d, in_channels_2d, norm='batch_norm'),
+            Conv1dNormRelu(in_channels_2d, in_channels_2d, norm='batch_norm'),
         )
         self.fuse3d_mlp = nn.Sequential(nn.Conv1d(in_channels_2d + in_channels_3d, in_channels_3d, kernel_size=1, bias=False),
                                     nn.BatchNorm1d(in_channels_3d),
@@ -1059,12 +1085,11 @@ class PointnetFPModuleWithImage(nn.Module):
 
         # points to image
         self.fuse2d_mlp = nn.Sequential(
-            # Conv2dBlock(in_channels_3d + 3, in_channels_3d),
-            Conv2dBlock(in_channels_3d, in_channels_3d),
-            Conv2dBlock(in_channels_3d, in_channels_3d),
-            Conv2dBlock(in_channels_3d, in_channels_3d),
+            Conv2dNormRelu(in_channels_3d + 3, in_channels_3d, norm='batch_norm'),
+            Conv2dNormRelu(in_channels_3d, in_channels_3d, norm='batch_norm'),
+            Conv2dNormRelu(in_channels_3d, in_channels_3d, norm='batch_norm'),
         )
-        self.fuse2d_conv = Conv2dBlock(in_channels_2d + in_channels_3d, in_channels_2d)
+        self.fuse2d_conv = Conv2dNormRelu(in_channels_2d + in_channels_3d, in_channels_2d)
 
 
     def forward(self,
@@ -1073,7 +1098,6 @@ class PointnetFPModuleWithImage(nn.Module):
                 unknow_feats: torch.Tensor,
                 known_feats: torch.Tensor,
                 image_features: torch.Tensor,
-                new_vis: torch.Tensor,
                 world_scale=None,
                 world_rotation=None,
                 flip_along_x=None,
@@ -1117,22 +1141,24 @@ class PointnetFPModuleWithImage(nn.Module):
             uv_list = []
 
             batch_size, _, image_features_h, image_features_w = image_features.shape
+            grid = pointnet2_utils.mesh_grid(batch_size, image_features_h, image_features_w, image_features.device)  # [B, 2, H, W]
+            grid = grid.reshape([batch_size, 2, -1])  # [B, 2, HW]
             
             # import pdb;pdb.set_trace()
             for bs_idx in range(batch_size):
                 keypoints_b = new_xyz[bs_idx].clone()
-                # if self.training:
-                # restore the raw positions of keypoints, seq: scale->rotate->flip?
-                if world_scale is not None:
-                    world_scale_b = world_scale[bs_idx]
-                    keypoints_b /= world_scale_b
-                if world_rotation is not None:
-                    world_rotation_b = world_rotation[bs_idx]
-                    keypoints_b = common_utils.rotate_points_along_z_single(keypoints_b, -world_rotation_b)
-                if flip_along_x is not None:
-                    flip_along_x_b = flip_along_x[bs_idx] # ad hoc, only process flip_x
-                    if flip_along_x_b:
-                        keypoints_b[:, 1] = -keypoints_b[:, 1]
+                if self.training:
+                    # restore the raw positions of keypoints, seq: scale->rotate->flip?
+                    if world_scale is not None:
+                        world_scale_b = world_scale[bs_idx]
+                        keypoints_b /= world_scale_b
+                    if world_rotation is not None:
+                        world_rotation_b = world_rotation[bs_idx]
+                        keypoints_b = rotate_points_along_z(keypoints_b, -world_rotation_b)
+                    if flip_along_x is not None:
+                        flip_along_x_b = flip_along_x[bs_idx] # ad hoc, only process flip_x
+                        if flip_along_x_b:
+                            keypoints_b[:, 1] = -keypoints_b[:, 1]
 
                 # project keypoint to image
                 keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
@@ -1157,33 +1183,21 @@ class PointnetFPModuleWithImage(nn.Module):
                 uv_list.append(scan_C2)
 
                 cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
-                valid_mask = new_vis[bs_idx].flatten() 
-                cur_point_image_features = torch.zeros((len(valid_mask), cur_image_features.shape[-1]), dtype=cur_image_features.dtype, device=cur_image_features.device)
-                valid_cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[valid_mask==1, 0], scan_C2[valid_mask==1, 1])
-                cur_point_image_features[valid_mask==1, :] = valid_cur_point_image_features
+                cur_point_image_features = bilinear_interpolate_torch(cur_image_features, scan_C2[:, 0], scan_C2[:, 1])
                 point_image_features_list.append(cur_point_image_features)
-
-            feat_3d_to_2d_list = []
-            for bs_idx in range(batch_size):
-                bs_uv = uv_list[bs_idx]
-                bs_uv_grid = torch.floor(bs_uv).int()
-                valid_point_mask = (bs_uv[:, 0]>=0) & (bs_uv[:, 0]<image_features[0].shape[2]) & (bs_uv[:, 1]>=0) & (bs_uv[:, 1]<image_features[0].shape[1])
-
                 # import pdb;pdb.set_trace()
-                valid_point_mask = valid_point_mask & (new_vis[bs_idx]>0).flatten()
 
-                bs_uv_grid = bs_uv_grid[valid_point_mask].transpose(0,1)
-                bs_new_features = new_features[bs_idx].transpose(0,1)[valid_point_mask, :]
-                mask_value = torch.ones([bs_new_features.shape[0],1], device=bs_new_features.device)
+            xy = torch.stack(uv_list).permute(0,2,1).contiguous()
+            # todo import k_nearest_neighbor
+            # import pdb;pdb.set_trace()
+            nn_indices = k_nearest_neighbor(xy, grid, 1)[..., 0]  # [B, HW]
+            nn_feat2d = batch_indexing_channel_first(grid_sample_wrapper(image_features, xy), nn_indices)  # [B, n_channels_2d, HW]
+            nn_feat3d = batch_indexing_channel_first(new_features, nn_indices)  # [B, n_channels_3d, HW]
+            nn_offset = batch_indexing_channel_first(xy, nn_indices) - grid  # [B, 2, HW]
+            nn_corr = torch.mean(nn_feat2d * image_features.reshape(batch_size, -1, image_features_h * image_features_w), dim=1, keepdim=True)  # [B, 1, HW]
 
-                gather_3d_features = torch.sparse_coo_tensor(bs_uv_grid, bs_new_features, (image_features_w, image_features_h, new_features.shape[1]))
-                gather_3d_features = gather_3d_features.to_dense()
-                gather_counts = torch.sparse_coo_tensor(bs_uv_grid, mask_value, (image_features_w, image_features_h, 1))
-                gather_counts = gather_counts.to_dense()
-                bs_feat_3d_to_2d = gather_3d_features / (gather_counts + 1e-6) # (w,h,c)
-                feat_3d_to_2d_list.append(bs_feat_3d_to_2d)
-
-            feat_3d_to_2d = torch.stack(feat_3d_to_2d_list).permute(0,3,2,1)
+            feat_3d_to_2d = torch.cat([nn_offset, nn_corr, nn_feat3d], dim=1)  # [B, n_channels_3d + 3, HW]
+            feat_3d_to_2d = feat_3d_to_2d.reshape([batch_size, -1, image_features_h, image_features_w])
 
             feat_3d_to_2d = self.fuse2d_mlp(feat_3d_to_2d)
             # import pdb;pdb.set_trace()

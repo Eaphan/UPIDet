@@ -1,5 +1,3 @@
-# 
-
 from typing import List, Tuple
 
 import torch
@@ -509,71 +507,101 @@ class GroupAll(nn.Module):
         return idx_cnt, new_features
 
 
-class Conv2dBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='lrelu'):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
-        
-        if norm == 'bn':
-            self.norm = nn.BatchNorm2d(out_channels)
-        elif norm == 'instance':
-            self.norm = nn.InstanceNorm2d(out_channels)
-        elif norm == 'ln':
-            self.norm = LayerNorm(out_channels)
-        elif norm == 'adap':
-            self.norm = AdaptiveInstanceNorm2d(out_channels)
-        else:
-            self.norm = None
-            #raise NotImplementedError
+mesh_grid_cache = {}
+def mesh_grid(n, h, w, device, channel_first=True):
+    global mesh_grid_cache
+    str_id = '%d,%d,%d,%s,%s' % (n, h, w, device, channel_first)
+    if str_id not in mesh_grid_cache:
+        x_base = torch.arange(0, w, dtype=torch.float32, device=device)[None, None, :].expand(n, h, w)
+        y_base = torch.arange(0, h, dtype=torch.float32, device=device)[None, None, :].expand(n, w, h)  # NWH
+        grid = torch.stack([x_base, y_base.transpose(1, 2)], 1)  # B2HW
+        if not channel_first:
+            grid = grid.permute(0, 2, 3, 1)  # BHW2
+        mesh_grid_cache[str_id] = grid
+    return mesh_grid_cache[str_id]
 
-        # initialize activation
-        if activation == 'relu':
-            self.activation = nn.ReLU()
-        elif activation == 'lrelu':
-            self.activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
-        elif activation == 'prelu':
-            self.activation = nn.PReLU()
-        elif activation == 'selu':
-            self.activation = nn.SELU()
+def batch_indexing_channel_first(batched_data: torch.Tensor, batched_indices: torch.Tensor):
+    """
+    :param batched_data: [batch_size, C, N]
+    :param batched_indices: [batch_size, I1, I2, ..., Im]
+    :return: indexed data: [batch_size, C, I1, I2, ..., Im]
+    """
+    def product(arr):
+        p = 1
+        for i in arr:
+            p *= i
+        return p
+    assert batched_data.shape[0] == batched_indices.shape[0]
+    batch_size, n_channels = batched_data.shape[:2]
+    indices_shape = list(batched_indices.shape[1:])
+    batched_indices = batched_indices.reshape([batch_size, 1, -1])
+    batched_indices = batched_indices.expand([batch_size, n_channels, product(indices_shape)])
+    result = torch.gather(batched_data, dim=2, index=batched_indices.to(torch.int64))
+    result = result.view([batch_size, n_channels] + indices_shape)
+    return result
+
+def grid_sample_wrapper(feat_2d, xy):
+    image_h, image_w = feat_2d.shape[2:]
+    new_x = 2.0 * xy[:, 0] / (image_w - 1) - 1.0  # [bs, n_points]
+    new_y = 2.0 * xy[:, 1] / (image_h - 1) - 1.0  # [bs, n_points]
+    new_xy = torch.cat([new_x[:, :, None, None], new_y[:, :, None, None]], dim=-1)  # [bs, n_points, 1, 2]
+    result = grid_sample(feat_2d, new_xy, 'bilinear', align_corners=True)  # [bs, n_channels, n_points, 1]
+    return result[..., 0]
+
+class Conv2dNormRelu(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm=None, activation='leaky_relu'):
+        super().__init__()
+        self.conv_fn = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
+
+        if norm == 'batch_norm':
+            self.norm_fn = nn.BatchNorm2d(out_channels)
+        elif norm == 'instance_norm':
+            self.norm_fn = nn.InstanceNorm2d(out_channels)
+        elif norm is None:
+            self.norm_fn = nn.Identity()
         else:
-            raise NotImplementedError
+            raise NotImplementedError('Unknown normalization function: %s' % norm)
+
+        if activation == 'relu':
+            self.relu_fn = nn.ReLU(inplace=True)
+        elif activation == 'leaky_relu':
+            self.relu_fn = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        elif activation is None:
+            self.relu_fn = nn.Identity()
+        else:
+            raise NotImplementedError('Unknown activation function: %s' % activation)
 
     def forward(self, x):
-        x = self.conv(x)
-        if self.norm is not None:
-            x = self.norm(x)
-        x = self.activation(x)
+        x = self.conv_fn(x)
+        x = self.norm_fn(x)
+        x = self.relu_fn(x)
         return x
 
-class Conv1dBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='lrelu'):
+class Conv1dNormRelu(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm=None, activation='leaky_relu'):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
-        if norm == 'bn':
-            self.norm = nn.BatchNorm1d(out_channels)
-        elif norm == 'instance':
-            self.norm = nn.InstanceNorm1d(out_channels)
-        elif norm == 'ln':
-            self.norm = LayerNorm(out_channels)
-        elif norm == 'adap':
-            self.norm = AdaptiveInstanceNorm1d(out_channels)
-        else:
-            raise NotImplementedError
+        self.conv_fn = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
 
-        # initialize activation
-        if activation == 'relu':
-            self.activation = nn.ReLU()
-        elif activation == 'lrelu':
-            self.activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
-        elif activation == 'prelu':
-            self.activation = nn.PReLU()
-        elif activation == 'selu':
-            self.activation = nn.SELU()
+        if norm == 'batch_norm':
+            self.norm_fn = nn.BatchNorm1d(out_channels)
+        elif norm == 'instance_norm':
+            self.norm_fn = nn.InstanceNorm1d(out_channels)
+        elif norm is None:
+            self.norm_fn = nn.Identity()
         else:
-            raise NotImplementedError
+            raise NotImplementedError('Unknown normalization function: %s' % norm)
+
+        if activation == 'relu':
+            self.relu_fn = nn.ReLU(inplace=True)
+        elif activation == 'leaky_relu':
+            self.relu_fn = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        elif activation is None:
+            self.relu_fn = nn.Identity()
+        else:
+            raise NotImplementedError('Unknown activation function: %s' % activation)
 
     def forward(self, x):
-        x = self.conv(x)
-        x = self.norm(x)
-        x = self.activation(x)
+        x = self.conv_fn(x)
+        x = self.norm_fn(x)
+        x = self.relu_fn(x)
         return x

@@ -62,6 +62,7 @@ class RoIHeadTemplate(nn.Module):
 
         """
         if batch_dict.get('rois', None) is not None:
+            batch_dict.pop('batch_index', None)
             return batch_dict
             
         batch_size = batch_dict['batch_size']
@@ -201,6 +202,11 @@ class RoIHeadTemplate(nn.Module):
         loss_cfgs = self.model_cfg.LOSS_CONFIG
         rcnn_cls = forward_ret_dict['rcnn_cls']
         rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels'].view(-1)
+
+        if (rcnn_cls_labels >= 0).sum() == 0:
+            tb_dict = {'rcnn_loss_cls': 0}
+            return 0, tb_dict
+
         if loss_cfgs.CLS_LOSS == 'BinaryCrossEntropy':
             rcnn_cls_flat = rcnn_cls.view(-1)
             batch_loss_cls = F.binary_cross_entropy(torch.sigmoid(rcnn_cls_flat), rcnn_cls_labels.float(), reduction='none')
@@ -215,6 +221,7 @@ class RoIHeadTemplate(nn.Module):
 
         rcnn_loss_cls = rcnn_loss_cls * loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
         tb_dict = {'rcnn_loss_cls': rcnn_loss_cls.item()}
+
         return rcnn_loss_cls, tb_dict
 
     def get_loss(self, tb_dict=None):

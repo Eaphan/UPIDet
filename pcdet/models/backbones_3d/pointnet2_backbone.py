@@ -5,7 +5,6 @@ from ...models.model_utils.pspnet import PSPModel
 from ...ops.pointnet2.pointnet2_batch import pointnet2_modules
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_modules_stack
 from ...ops.pointnet2.pointnet2_stack import pointnet2_utils as pointnet2_utils_stack
-from ...utils import common_utils
 
 class PointNet2MSG(nn.Module):
     def __init__(self, model_cfg, input_channels, **kwargs):
@@ -174,7 +173,8 @@ class PointNet2FSMSG(nn.Module):
                         mlp=[pre_channel + skip_channel_list[k + l_skipped]] + fp_mlps[k]
                     )
                 )
-            self.num_point_features = fp_mlps[0][-1]
+            # self.num_point_features = fp_mlps[0][-1]
+            self.num_fp_point_features = fp_mlps[0][-1]
         else:
             self.FP_modules = None
 
@@ -239,15 +239,25 @@ class PointNet2FSMSG(nn.Module):
                 l_features[i - 1] = self.FP_modules[i](
                     l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
                 )  # (B, C, N)
+
+            point_features = l_features[i - 1].permute(0, 2, 1).contiguous()  # (B, N, C)
+            batch_dict['fp_point_features'] = point_features.view(-1, point_features.shape[-1])
+            batch_dict['fp_point_coords'] = torch.cat((
+                batch_idx[:, :l_xyz[i - 1].size(1)].reshape(-1, 1).float(),
+                l_xyz[i - 1].view(-1, 3)), dim=1)
+            batch_dict['point_scores'] = l_scores[-1]  # (B, N)
         else:  # take l_xyz[i - 1] and l_features[i - 1]
             i = 0
 
+
+        batch_dict['l_features'] = l_features
+        batch_dict['l_xyz'] = l_xyz
+        i = 0
         point_features = l_features[i - 1].permute(0, 2, 1).contiguous()  # (B, N, C)
         batch_dict['point_features'] = point_features.view(-1, point_features.shape[-1])
         batch_dict['point_coords'] = torch.cat((
             batch_idx[:, :l_xyz[i - 1].size(1)].reshape(-1, 1).float(),
             l_xyz[i - 1].view(-1, 3)), dim=1)
-        batch_dict['point_scores'] = l_scores[-1]  # (B, N)
         return batch_dict
 
 
@@ -478,10 +488,8 @@ class _3DSSD_Backbone(nn.Module):
     def break_up_pc(self, pc):
         batch_idx = pc[:, 0]
         xyz = pc[:, 1:4].contiguous()
-        # ad hoc
-        features = pc[:, 4:5].contiguous()
-        visible_mask = pc[:, 5].contiguous()
-        return batch_idx, xyz, features, visible_mask
+        features = (pc[:, 4:].contiguous() if pc.size(-1) > 4 else None)
+        return batch_idx, xyz, features
 
     def forward(self, batch_dict):
         """
@@ -497,7 +505,7 @@ class _3DSSD_Backbone(nn.Module):
         """
         batch_size = batch_dict['batch_size']
         points = batch_dict['points']
-        batch_idx, xyz, features, visible_mask = self.break_up_pc(points)
+        batch_idx, xyz, features = self.break_up_pc(points)
         
         # segmentation_out, image_feature_dict = self.image_backbone(batch_dict['images'])
         # batch_dict['segmentation_preds'] = segmentation_out
@@ -523,12 +531,9 @@ class _3DSSD_Backbone(nn.Module):
         features = features.view(batch_size, -1, features.shape[-1]) if features is not None else None
         features = features.permute(0, 2, 1).contiguous() if features is not None else None
 
-        visible_mask = visible_mask.view(batch_size, 1, -1) if visible_mask is not None else None
-        visible_mask = visible_mask.permute(0, 2, 1).contiguous() if visible_mask is not None else None
-
         batch_idx = batch_idx.view(batch_size, -1).float()
 
-        l_xyz, l_features, l_vis, l_scores = [xyz], [features], [visible_mask], [None]
+        l_xyz, l_features, l_scores = [xyz], [features], [None]
         for i in range(len(self.SA_modules)):
             if isinstance(self.image_encoder_modules[image_backbone_module_idx], list):
                 for m in self.image_encoder_modules[image_backbone_module_idx]:
@@ -538,8 +543,8 @@ class _3DSSD_Backbone(nn.Module):
             else:
                 image_x = self.image_encoder_modules[image_backbone_module_idx](image_x)
             image_backbone_module_idx += 1
-            li_xyz, li_features, li_vis, li_scores, image_x = self.SA_modules[i](
-                l_xyz[i], l_features[i], l_vis[i],
+            li_xyz, li_features, li_scores, image_x = self.SA_modules[i](
+                l_xyz[i], l_features[i],
                 scores=l_scores[i],
                 image_features=image_x,
                 world_scale=world_scale,
@@ -552,7 +557,6 @@ class _3DSSD_Backbone(nn.Module):
             )
             l_xyz.append(li_xyz)
             l_features.append(li_features)
-            l_vis.append(li_vis)
             l_scores.append(li_scores)
 
         # prepare for confidence loss
@@ -573,6 +577,7 @@ class _3DSSD_Backbone(nn.Module):
         for i in range(len(self.image_middle_modules)):
             image_x = self.image_middle_modules[i](image_x)
 
+        # import pdb;pdb.set_trace()
         if self.FP_modules is not None:
             for i in range(-1, -(len(self.FP_modules) + 1), -1):
                 cur_i = -1 - i
@@ -583,7 +588,7 @@ class _3DSSD_Backbone(nn.Module):
                     image_x = self.image_decoder_modules[cur_i](image_x)
                 # import pdb;pdb.set_trace()
                 l_features[i - 1], image_x = self.FP_modules[i](
-                    l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i], image_x, l_vis[i - 1],
+                    l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i], image_x, 
                     world_scale=world_scale,
                     world_rotation=world_rotation,
                     flip_along_x=flip_along_x,
@@ -602,49 +607,6 @@ class _3DSSD_Backbone(nn.Module):
             batch_idx[:, :l_xyz[i - 1].size(1)].reshape(-1, 1).float(),
             l_xyz[i - 1].view(-1, 3)), dim=1)
 
-        # retrieve image features by fp_point_coords
-        point_image_features_list = []
-        # _, _, image_features_h, image_features_w = image_features.shape
-        
-        # import pdb;pdb.set_trace()
-        new_xyz = l_xyz[i - 1]
-        image_features = image_x
-        for bs_idx in range(batch_size):
-            keypoints_b = new_xyz[bs_idx].clone()
-            if self.training:
-                # restore the raw positions of keypoints, seq: scale->rotate->flip?
-                if world_scale is not None:
-                    world_scale_b = world_scale[bs_idx]
-                    keypoints_b /= world_scale_b
-                if world_rotation is not None:
-                    world_rotation_b = world_rotation[bs_idx]
-                    keypoints_b = common_utils.rotate_points_along_z_single(keypoints_b, -world_rotation_b)
-                if flip_along_x is not None:
-                    flip_along_x_b = flip_along_x[bs_idx] # ad hoc, only process flip_x
-                    if flip_along_x_b:
-                        keypoints_b[:, 1] = -keypoints_b[:, 1]
-
-            # project keypoint to image
-            keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
-            scan_C0 = torch.mm(keypoints_b_hom, V2R[bs_idx].T)
-            scan_C2 = torch.mm(scan_C0, P2[bs_idx].T) # [N, 3]
-            scan_C2_depth = scan_C2[:, 2]
-            scan_C2 = (scan_C2[:, :2].T / scan_C2[:, 2]).T
-
-            scan_C2[:, 0] *= (image_features[bs_idx].shape[2]/image_shape[1]) # w
-            scan_C2[:, 1] *= (image_features[bs_idx].shape[1]/image_shape[0]) # h
-            # uv_list.append(scan_C2)
-
-            cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
-            if self.training:
-                cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[:, 0], scan_C2[:, 1])
-            else:
-                cur_point_image_features = cur_image_features.reshape(-1, cur_image_features.shape[-1]) #(HxW, C)
-            point_image_features_list.append(cur_point_image_features)
-            # import pdb;pdb.set_trace()
-        fp_point_image_features = torch.stack(point_image_features_list)
-        batch_dict['fp_point_image_features'] = fp_point_image_features.view(-1, fp_point_image_features.shape[-1]) #(bsxHxW, C)
-
         i = 0
         point_features = l_features[i - 1].permute(0, 2, 1).contiguous()  # (B, N, C)
         batch_dict['point_features'] = point_features.view(-1, point_features.shape[-1])
@@ -653,7 +615,7 @@ class _3DSSD_Backbone(nn.Module):
             l_xyz[i - 1].view(-1, 3)), dim=1)
         # batch_dict['point_scores'] = l_scores[-1]  # (B, N), unused
 
-        image_x = self.image_final_head(image_x) # preds
+        image_x = self.image_final_head(image_x)
         batch_dict['segmentation_preds'] = image_x
 
         return batch_dict

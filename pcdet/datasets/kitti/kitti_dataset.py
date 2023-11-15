@@ -322,7 +322,6 @@ class KittiDataset(DatasetTemplate):
             pred_dict['location'] = pred_boxes_camera[:, 0:3]
             pred_dict['rotation_y'] = pred_boxes_camera[:, 6]
             pred_dict['score'] = pred_scores
-            pred_dict['boxes_lidar'] = pred_boxes
             pred_dict['segmentation_preds'] = box_dict['segmentation_preds']
             if 'segmentation_label' in box_dict:
                 pred_dict['segmentation_label'] = box_dict['segmentation_label']

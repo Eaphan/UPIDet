@@ -69,7 +69,6 @@ class PointHeadTemplate(nn.Module):
         bs_idx = points[:, 0]
         point_cls_labels = points.new_zeros(points.shape[0]).long()
         point_box_labels = gt_boxes.new_zeros((points.shape[0], 8)) if ret_box_labels else None
-        point_ctr_labels = gt_boxes.new_zeros((points.shape[0], 3)) if ret_part_labels else None
         point_part_labels = gt_boxes.new_zeros((points.shape[0], 3)) if ret_part_labels else None
         for k in range(batch_size):
             bs_mask = (bs_idx == k)
@@ -108,7 +107,6 @@ class PointHeadTemplate(nn.Module):
                 point_box_labels[bs_mask] = point_box_labels_single
 
             if ret_part_labels:
-                point_ctr_labels_single = point_part_labels.new_zeros((bs_mask.sum(), 3))
                 point_part_labels_single = point_part_labels.new_zeros((bs_mask.sum(), 3))
                 transformed_points = points_single[fg_flag] - gt_box_of_fg_points[:, 0:3]
                 transformed_points = common_utils.rotate_points_along_z(
@@ -116,15 +114,12 @@ class PointHeadTemplate(nn.Module):
                 ).view(-1, 3)
                 offset = torch.tensor([0.5, 0.5, 0.5]).view(1, 3).type_as(transformed_points)
                 point_part_labels_single[fg_flag] = (transformed_points / gt_box_of_fg_points[:, 3:6]) + offset
-                point_ctr_labels_single[fg_flag] = transformed_points
                 point_part_labels[bs_mask] = point_part_labels_single
-                point_ctr_labels[bs_mask] = point_ctr_labels_single
 
         targets_dict = {
             'point_cls_labels': point_cls_labels,
             'point_box_labels': point_box_labels,
-            'point_part_labels': point_part_labels,
-            'point_ctr_labels': point_ctr_labels
+            'point_part_labels': point_part_labels
         }
         return targets_dict
 

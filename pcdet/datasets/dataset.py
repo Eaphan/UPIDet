@@ -124,7 +124,7 @@ class DatasetTemplate(torch_data.Dataset):
             assert 'gt_boxes' in data_dict, 'gt_boxes should be provided for training'
             gt_boxes_mask = np.array([n in self.class_names for n in data_dict['gt_names']], dtype=np.bool_)
 
-            calib = data_dict['calib']
+            # calib = data_dict['calib']
             points_before_aug = copy.deepcopy(data_dict['points'])
             data_dict['points_before_aug'] = points_before_aug
             data_dict['num_original_point'] = len(points_before_aug)
@@ -134,15 +134,10 @@ class DatasetTemplate(torch_data.Dataset):
                     'gt_boxes_mask': gt_boxes_mask
                 }
             )
-            data_dict['calib'] = calib
+            # data_dict['calib'] = calib
             points_after_aug = copy.deepcopy(data_dict['points'])
             points_before_aug = data_dict['points_before_aug']
-        else:
-            # ad hoc, can add param
-            points_num = len(data_dict['points'])
-            visible_mask = np.ones([points_num, 1])
-            data_dict['points'] = np.concatenate([data_dict['points'], visible_mask], axis=1)
-
+        
         # import pdb;pdb.set_trace()
 
         if data_dict.get('gt_boxes', None) is not None:

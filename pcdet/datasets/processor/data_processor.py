@@ -4,7 +4,6 @@ import numpy as np
 from skimage import transform
 
 from ...utils import box_utils, common_utils
-from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 
 tv = None
 try:
@@ -76,51 +75,17 @@ class DataProcessor(object):
             cur_processor = getattr(self, cur_cfg.NAME)(config=cur_cfg)
             self.data_processor_queue.append(cur_processor)
 
-    def remove_empty_bounding_boxes(self, data_dict=None, config=None):
-        if data_dict is None:
-            return partial(self.remove_empty_bounding_boxes, config=config)
-
-
-        if data_dict.get('gt_boxes', None) is not None and self.training:
-            boxes3d, is_numpy = common_utils.check_numpy_to_torch(data_dict['gt_boxes'][:, :7])
-            points, is_numpy = common_utils.check_numpy_to_torch(data_dict['points'])
-            box_point_masks = roiaware_pool3d_utils.points_in_boxes_cpu(points[:, 0:3], boxes3d)#(N, num_points)
-            box_valid_mask = box_point_masks.sum(dim=1) != 0
-
-            data_dict['gt_boxes'] = data_dict['gt_boxes'][box_valid_mask]
-            data_dict['gt_boxes2d'] = data_dict['gt_boxes2d'][box_valid_mask]
-            if 'segmentation' in data_dict:
-                data_dict['segmentation'] = [data_dict['segmentation'][i] for i in range(len(box_valid_mask)) if box_valid_mask[i]]
-        return data_dict
-
     def mask_points_and_boxes_outside_range(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.mask_points_and_boxes_outside_range, config=config)
 
         if data_dict.get('points', None) is not None:
             mask = common_utils.mask_points_by_range(data_dict['points'], self.point_cloud_range)
-            if 'num_original_point' in data_dict:
-                data_dict['num_original_point'] = mask[:data_dict['num_original_point']].sum()
             data_dict['points'] = data_dict['points'][mask]
 
         if data_dict.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
             mask = box_utils.mask_boxes_outside_range_numpy(
                 data_dict['gt_boxes'], self.point_cloud_range, min_num_corners=config.get('min_num_corners', 1)
-            )
-            data_dict['gt_boxes'] = data_dict['gt_boxes'][mask]
-            data_dict['gt_boxes2d'] = data_dict['gt_boxes2d'][mask]
-            if 'segmentation' in data_dict:
-                data_dict['segmentation'] = [data_dict['segmentation'][i] for i in range(len(mask)) if mask[i]]
-        return data_dict
-
-    def mask_points_and_boxes_outside_crop(self, data_dict=None, config=None):
-        if data_dict is None:
-            return partial(self.mask_points_and_boxes_outside_range, config=config)
-        mask = common_utils.mask_points_by_range(data_dict['points'], data_dict['crop_range'])
-        data_dict['points'] = data_dict['points'][mask]
-        if data_dict.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
-            mask = box_utils.mask_boxes_outside_range_numpy(
-                data_dict['gt_boxes'], data_dict['crop_range'], min_num_corners=config.get('min_num_corners', 1)
             )
             data_dict['gt_boxes'] = data_dict['gt_boxes'][mask]
         return data_dict
@@ -218,72 +183,6 @@ class DataProcessor(object):
         data_dict.pop('voxel_num_points')
 
         return data_dict
-    
-    def sample_points_by_voxel(self, data_dict=None, config=None):
-        if data_dict is None:
-            return partial(self.sample_points_by_voxel, config=config)
-
-        try:
-            from spconv.utils import VoxelGeneratorV2 as VoxelGenerator
-        except:
-            from spconv.utils import VoxelGenerator
-
-        key_frame_voxel_generator = VoxelGenerator(
-            voxel_size=config.VOXEL_SIZE,
-            point_cloud_range=self.point_cloud_range,
-            max_num_points=1,
-            max_voxels=config.KEY_FRAME_NUMBER_OF_VOXELS[self.mode]
-        )
-        other_frame_voxel_generator = VoxelGenerator(
-            voxel_size=config.VOXEL_SIZE,
-            point_cloud_range=self.point_cloud_range,
-            max_num_points=1,
-            max_voxels=config.OTHER_FRAME_NUMBER_OF_VOXELS[self.mode]
-        )
-        grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
-        self.grid_size = np.round(grid_size).astype(np.int64)
-        self.voxel_size = config.VOXEL_SIZE
-
-        points = data_dict['points']
-        times = points[:, -1]
-        key_frame_mask = (times == 0)
-        other_frame_mask = (times != 0)
-        key_frame_points = points[key_frame_mask, :]
-        other_frame_points = points[other_frame_mask, :]
-        if len(other_frame_points) == 0:
-            other_frame_points = points
-
-        key_frame_output = key_frame_voxel_generator.generate(key_frame_points)
-        other_frame_output = other_frame_voxel_generator.generate(other_frame_points)
-
-        if isinstance(key_frame_output, dict):
-            key_frame_points = key_frame_output['voxels']
-            other_frame_points = other_frame_output['voxels']
-        else:
-            key_frame_points = key_frame_output[0]
-            other_frame_points = other_frame_output[0]
-
-        key_frame_points = np.squeeze(key_frame_points, axis=1)
-        other_frame_points = np.squeeze(other_frame_points, axis=1)
-        
-        choice = np.arange(0, len(key_frame_points), dtype=np.int32)
-        if len(key_frame_points) < config.KEY_FRAME_NUMBER_OF_VOXELS[self.mode]:
-            extra_choice = np.random.choice(choice, config.KEY_FRAME_NUMBER_OF_VOXELS[self.mode] - len(key_frame_points), replace=True)
-            choice = np.concatenate((choice, extra_choice), axis=0)
-        np.random.shuffle(choice)
-        key_frame_points = key_frame_points[choice]
-        
-        choice = np.arange(0, len(other_frame_points), dtype=np.int32)
-        if len(other_frame_points) < config.OTHER_FRAME_NUMBER_OF_VOXELS[self.mode]:
-            extra_choice = np.random.choice(choice, config.OTHER_FRAME_NUMBER_OF_VOXELS[self.mode] - len(other_frame_points), replace=True)
-            choice = np.concatenate((choice, extra_choice), axis=0)
-        np.random.shuffle(choice)
-        other_frame_points = other_frame_points[choice]
-        
-        points = np.concatenate((key_frame_points, other_frame_points), axis=0)
-        data_dict['points'] = points
-        return data_dict
-
 
     def sample_points(self, data_dict=None, config=None):
         if data_dict is None:
@@ -311,7 +210,7 @@ class DataProcessor(object):
         else:
             choice = np.arange(0, len(points), dtype=np.int32)
             if num_points > len(points):
-                extra_choice = np.random.choice(choice, num_points - len(points), replace=True)
+                extra_choice = np.random.choice(choice, num_points - len(points))
                 choice = np.concatenate((choice, extra_choice), axis=0)
             np.random.shuffle(choice)
         data_dict['points'] = points[choice]
@@ -352,3 +251,4 @@ class DataProcessor(object):
             data_dict = cur_processor(data_dict=data_dict)
 
         return data_dict
+

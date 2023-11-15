@@ -8,7 +8,7 @@ from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 from ...ops.pointnet2.pointnet2_batch import pointnet2_modules
 from ...utils import box_coder_utils, box_utils, common_utils, loss_utils
 from .point_head_template import PointHeadTemplate
-
+from ..model_utils import model_nms_utils
 
 class PointHeadVote(PointHeadTemplate):
     """
@@ -16,7 +16,7 @@ class PointHeadVote(PointHeadTemplate):
     Reference Paper: https://arxiv.org/abs/2002.10187
     3DSSD: Point-based 3D Single Stage Object Detector
     """
-    def __init__(self, num_class, input_channels, fp_input_channels, model_cfg, predict_boxes_when_training=False, **kwargs):
+    def __init__(self, num_class, input_channels, model_cfg, predict_boxes_when_training=False, **kwargs):
         super().__init__(model_cfg=model_cfg, num_class=num_class)
         use_bn = self.model_cfg.USE_BN
         self.predict_boxes_when_training = predict_boxes_when_training
@@ -57,39 +57,28 @@ class PointHeadVote(PointHeadTemplate):
         self.shared_fc_layer = nn.Sequential(*shared_fc_list)
         channel_in = self.model_cfg.SHARED_FC[-1]
 
-        self.cls_layers = self.make_fc_layers(
-            input_channels=channel_in,
-            output_channels=num_class if not self.model_cfg.LOSS_CONFIG.LOSS_CLS == 'CrossEntropy' else num_class + 1,
-            fc_list=self.model_cfg.CLS_FC
-        )
-
         target_cfg = self.model_cfg.TARGET_CONFIG
         self.box_coder = getattr(box_coder_utils, target_cfg.BOX_CODER)(
             **target_cfg.BOX_CODER_CONFIG
         )
-        self.reg_layers = self.make_fc_layers(
-            input_channels=channel_in,
-            output_channels=self.box_coder.code_size,
-            fc_list=self.model_cfg.REG_FC
-        )
 
-        self.fp_cls_layers = self.make_fc_layers(
-            fc_list=self.model_cfg.FP_CLS_FC,
-            input_channels=fp_input_channels,
-            output_channels=num_class
-        )
-        self.fp_part_reg_layers = self.make_fc_layers(
-            fc_list=self.model_cfg.PART_FC,
-            input_channels=fp_input_channels,
-            output_channels=3
-        )
-        self.fp_part_reg_image_layers = self.make_fc_layers(
-            fc_list=self.model_cfg.PART_FC,
-            input_channels=fp_input_channels,
-            output_channels=3
-        )
+        # self.heads_list = []
+        for i in range(num_class):
+            cls_layers = self.make_fc_layers(
+                input_channels=channel_in,
+                output_channels=1 if not self.model_cfg.LOSS_CONFIG.LOSS_CLS == 'CrossEntropy' else num_class + 1,
+                fc_list=self.model_cfg.CLS_FC
+            )
 
-        self.segmentation_loss_func = nn.CrossEntropyLoss(ignore_index=255)
+            reg_layers = self.make_fc_layers(
+                input_channels=channel_in,
+                output_channels=self.box_coder.code_size,
+                fc_list=self.model_cfg.REG_FC
+            )
+
+            self.__setattr__(f'cls_layer_{i}', cls_layers)
+            self.__setattr__(f'reg_layer_{i}', reg_layers)
+
         self.init_weights(weight_init='xavier')
 
     def init_weights(self, weight_init='xavier'):
@@ -424,36 +413,6 @@ class PointHeadVote(PointHeadTemplate):
         else:
             raise NotImplementedError
 
-        targets_dict['segmentation_label'] = input_dict['segmentation_label']
-        return targets_dict
-
-    def assign_targets_fp(self, input_dict):
-        """
-        Args:
-            input_dict:
-                point_features: (N1 + N2 + N3 + ..., C)
-                batch_size:
-                point_coords: (N1 + N2 + N3 + ..., 4) [bs_idx, x, y, z]
-                gt_boxes (optional): (B, M, 8)
-        Returns:
-            point_cls_labels: (N1 + N2 + N3 + ...), long type, 0:background, -1:ignored
-            point_part_labels: (N1 + N2 + N3 + ..., 3)
-        """
-        point_coords = input_dict['fp_point_coords']
-        gt_boxes = input_dict['gt_boxes']
-        assert gt_boxes.shape.__len__() == 3, 'gt_boxes.shape=%s' % str(gt_boxes.shape)
-        assert point_coords.shape.__len__() in [2], 'points.shape=%s' % str(point_coords.shape)
-
-        batch_size = gt_boxes.shape[0]
-        extend_gt_boxes = box_utils.enlarge_box3d(
-            gt_boxes.view(-1, gt_boxes.shape[-1]), extra_width=self.model_cfg.TARGET_CONFIG.PART_EXTRA_WIDTH
-        ).view(batch_size, -1, gt_boxes.shape[-1])
-        targets_dict = self.assign_stack_targets(
-            points=point_coords, gt_boxes=gt_boxes, extend_gt_boxes=extend_gt_boxes,
-            set_ignore_flag=True, use_ball_constraint=False,
-            ret_part_labels=True, ret_box_labels=False
-        )
-
         return targets_dict
 
     def get_vote_layer_loss(self, tb_dict=None):
@@ -569,127 +528,136 @@ class PointHeadVote(PointHeadTemplate):
         return corner_loss.mean(dim=1)
 
     def get_cls_layer_loss(self, tb_dict=None):
-        point_cls_labels = self.forward_ret_dict['point_cls_labels'].view(-1)
-        point_cls_preds = self.forward_ret_dict['point_cls_preds'].view(-1, self.num_class)
+        point_loss_cls = 0
+        point_pos_num = 0
+        for i in range(self.num_class):
+            point_cls_labels = self.forward_ret_dict['point_cls_labels_list'][i].view(-1)
+            # point_cls_preds = self.forward_ret_dict['point_cls_preds_list'][i].view(-1, self.num_class)
+            point_cls_preds = self.forward_ret_dict['point_cls_preds_list'][i].view(-1, 1)
 
-        positives = point_cls_labels > 0
-        negatives = point_cls_labels == 0
-        cls_weights = positives * 1.0 + negatives * 1.0
+            positives = point_cls_labels > 0
+            negatives = point_cls_labels == 0
+            cls_weights = positives * 1.0 + negatives * 1.0
 
-        one_hot_targets = point_cls_preds.new_zeros(*list(point_cls_labels.shape), self.num_class + 1)
-        one_hot_targets.scatter_(-1, (point_cls_labels * (point_cls_labels >= 0).long()).unsqueeze(dim=-1).long(), 1.0)
-        self.forward_ret_dict['point_cls_labels_onehot'] = one_hot_targets
+            one_hot_targets = point_cls_preds.new_zeros(*list(point_cls_labels.shape), self.num_class + 1)
+            one_hot_targets.scatter_(-1, (point_cls_labels * (point_cls_labels >= 0).long()).unsqueeze(dim=-1).long(), 1.0)
+            self.forward_ret_dict['point_cls_labels_onehot'] = one_hot_targets
 
-        loss_cfgs = self.model_cfg.LOSS_CONFIG
-        if 'WithCenterness' in loss_cfgs.LOSS_CLS:
-            point_base = self.forward_ret_dict['point_vote_coords']
-            point_box_labels = self.forward_ret_dict['point_box_labels']
-            centerness_label = self.generate_centerness_label(point_base, point_box_labels, positives)
-            
-            loss_cls_cfg = loss_cfgs.get('LOSS_CLS_CONFIG', None)
-            centerness_min = loss_cls_cfg['centerness_min'] if loss_cls_cfg is not None else 0.0
-            centerness_max = loss_cls_cfg['centerness_max'] if loss_cls_cfg is not None else 1.0
-            centerness_label = centerness_min + (centerness_max - centerness_min) * centerness_label
-            
-            one_hot_targets *= centerness_label.unsqueeze(dim=-1)
+            loss_cfgs = self.model_cfg.LOSS_CONFIG
+            if 'WithCenterness' in loss_cfgs.LOSS_CLS:
+                point_base = self.forward_ret_dict['point_vote_coords']
+                point_box_labels = self.forward_ret_dict['point_box_labels_list'][i]
+                centerness_label = self.generate_centerness_label(point_base, point_box_labels, positives)
+                
+                loss_cls_cfg = loss_cfgs.get('LOSS_CLS_CONFIG', None)
+                centerness_min = loss_cls_cfg['centerness_min'] if loss_cls_cfg is not None else 0.0
+                centerness_max = loss_cls_cfg['centerness_max'] if loss_cls_cfg is not None else 1.0
+                centerness_label = centerness_min + (centerness_max - centerness_min) * centerness_label
+                
+                one_hot_targets *= centerness_label.unsqueeze(dim=-1)
+            point_loss_cls_single = self.cls_loss_func(point_cls_preds, one_hot_targets[..., i+1:i+2], weights=cls_weights)
+            loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
+            point_loss_cls_single = point_loss_cls_single * loss_weights_dict['point_cls_weight']
+            point_loss_cls_single = point_loss_cls_single.sum() / torch.clamp(cls_weights.sum(), min=1.0)
 
-        point_loss_cls = self.cls_loss_func(point_cls_preds, one_hot_targets[..., 1:], weights=cls_weights)
-
-        loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
-        point_loss_cls = point_loss_cls * loss_weights_dict['point_cls_weight']
+            point_loss_cls += point_loss_cls_single
+            point_pos_num += positives.sum().item()
         if tb_dict is None:
             tb_dict = {}
         tb_dict.update({
-            'point_pos_num': positives.sum().item()
+            'point_pos_num': point_pos_num
         })
-        return point_loss_cls, cls_weights, tb_dict  # point_loss_cls: (N)
+        return point_loss_cls, tb_dict  # point_loss_cls: (N)
 
     def get_box_layer_loss(self, tb_dict=None):
-        pos_mask = self.forward_ret_dict['point_cls_labels'] > 0
-        point_reg_preds = self.forward_ret_dict['point_reg_preds']
-        point_reg_labels = self.forward_ret_dict['point_reg_labels']
+        point_loss_box_all = 0
+        for i in range(self.num_class):
+            pos_mask = self.forward_ret_dict['point_cls_labels_list'][i] > 0
+            point_reg_preds = self.forward_ret_dict['point_reg_preds_list'][i]
+            point_reg_labels = self.forward_ret_dict['point_reg_labels_list'][i]
 
-        reg_weights = pos_mask.float()
+            reg_weights = pos_mask.float()
 
-        loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
-        if tb_dict is None:
-            tb_dict = {}
+            loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
+            if tb_dict is None:
+                tb_dict = {}
 
-        point_loss_offset_reg = self.reg_loss_func(
-            point_reg_preds[None, :, :6],
-            point_reg_labels[None, :, :6],
-            weights=reg_weights[None, ...]
-        )
-        point_loss_offset_reg = point_loss_offset_reg.sum(dim=-1).squeeze()
-
-        if hasattr(self.box_coder, 'pred_velo') and self.box_coder.pred_velo:
-            point_loss_velo_reg = self.reg_loss_func(
-                point_reg_preds[None, :, 6 + 2 * self.box_coder.angle_bin_num:8 + 2 * self.box_coder.angle_bin_num],
-                point_reg_labels[None, :, 6 + 2 * self.box_coder.angle_bin_num:8 + 2 * self.box_coder.angle_bin_num],
+            point_loss_offset_reg = self.reg_loss_func(
+                point_reg_preds[None, :, :6],
+                point_reg_labels[None, :, :6],
                 weights=reg_weights[None, ...]
             )
-            point_loss_velo_reg = point_loss_velo_reg.sum(dim=-1).squeeze()
-            point_loss_offset_reg = point_loss_offset_reg + point_loss_velo_reg
+            point_loss_offset_reg = point_loss_offset_reg.sum(dim=-1).squeeze()
 
-        point_loss_offset_reg *= loss_weights_dict['point_offset_reg_weight']
-
-        if isinstance(self.box_coder, box_coder_utils.PointBinResidualCoder):
-            point_angle_cls_labels = \
-                point_reg_labels[:, 6:6 + self.box_coder.angle_bin_num]
-            point_loss_angle_cls = F.cross_entropy(  # angle bin cls
-                point_reg_preds[:, 6:6 + self.box_coder.angle_bin_num],
-                point_angle_cls_labels.argmax(dim=-1), reduction='none') * reg_weights
-
-            point_angle_reg_preds = point_reg_preds[:, 6 + self.box_coder.angle_bin_num:6 + 2 * self.box_coder.angle_bin_num]
-            point_angle_reg_labels = point_reg_labels[:, 6 + self.box_coder.angle_bin_num:6 + 2 * self.box_coder.angle_bin_num]
-            point_angle_reg_preds = (point_angle_reg_preds * point_angle_cls_labels).sum(dim=-1, keepdim=True)
-            point_angle_reg_labels = (point_angle_reg_labels * point_angle_cls_labels).sum(dim=-1, keepdim=True)
-            point_loss_angle_reg = self.reg_loss_func(
-                point_angle_reg_preds[None, ...],
-                point_angle_reg_labels[None, ...],
-                weights=reg_weights[None, ...]
-            )
-            point_loss_angle_reg = point_loss_angle_reg.squeeze()
-
-            point_loss_angle_cls *= loss_weights_dict['point_angle_cls_weight']
-            point_loss_angle_reg *= loss_weights_dict['point_angle_reg_weight']
-
-            point_loss_box = point_loss_offset_reg + point_loss_angle_cls + point_loss_angle_reg  # (N)
-        else:
-            point_angle_reg_preds = point_reg_preds[:, 6:]
-            point_angle_reg_labels = point_reg_labels[:, 6:]
-            point_loss_angle_reg = self.reg_loss_func(
-                point_angle_reg_preds[None, ...],
-                point_angle_reg_labels[None, ...],
-                weights=reg_weights[None, ...]
-            )
-            point_loss_angle_reg *= loss_weights_dict['point_angle_reg_weight']
-            point_loss_box = point_loss_offset_reg + point_loss_angle_reg
-
-        if reg_weights.sum() > 0:
-            point_box_preds = self.forward_ret_dict['point_box_preds']
-            point_box_labels = self.forward_ret_dict['point_box_labels']
-            point_loss_box_aux = 0
-
-            if self.model_cfg.LOSS_CONFIG.get('AXIS_ALIGNED_IOU_LOSS_REGULARIZATION', False):
-                point_loss_iou = self.get_axis_aligned_iou_loss_lidar(
-                    point_box_preds[pos_mask, :],
-                    point_box_labels[pos_mask, :]
+            if hasattr(self.box_coder, 'pred_velo') and self.box_coder.pred_velo:
+                point_loss_velo_reg = self.reg_loss_func(
+                    point_reg_preds[None, :, 6 + 2 * self.box_coder.angle_bin_num:8 + 2 * self.box_coder.angle_bin_num],
+                    point_reg_labels[None, :, 6 + 2 * self.box_coder.angle_bin_num:8 + 2 * self.box_coder.angle_bin_num],
+                    weights=reg_weights[None, ...]
                 )
-                point_loss_iou *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['point_iou_weight']
-                point_loss_box_aux = point_loss_box_aux + point_loss_iou
+                point_loss_velo_reg = point_loss_velo_reg.sum(dim=-1).squeeze()
+                point_loss_offset_reg = point_loss_offset_reg + point_loss_velo_reg
 
-            if self.model_cfg.LOSS_CONFIG.get('CORNER_LOSS_REGULARIZATION', False):
-                point_loss_corner = self.get_corner_loss_lidar(
-                    point_box_preds[pos_mask, 0:7],
-                    point_box_labels[pos_mask, 0:7]
+            point_loss_offset_reg *= loss_weights_dict['point_offset_reg_weight']
+
+            if isinstance(self.box_coder, box_coder_utils.PointBinResidualCoder):
+                point_angle_cls_labels = \
+                    point_reg_labels[:, 6:6 + self.box_coder.angle_bin_num]
+                point_loss_angle_cls = F.cross_entropy(  # angle bin cls
+                    point_reg_preds[:, 6:6 + self.box_coder.angle_bin_num],
+                    point_angle_cls_labels.argmax(dim=-1), reduction='none') * reg_weights
+
+                point_angle_reg_preds = point_reg_preds[:, 6 + self.box_coder.angle_bin_num:6 + 2 * self.box_coder.angle_bin_num]
+                point_angle_reg_labels = point_reg_labels[:, 6 + self.box_coder.angle_bin_num:6 + 2 * self.box_coder.angle_bin_num]
+                point_angle_reg_preds = (point_angle_reg_preds * point_angle_cls_labels).sum(dim=-1, keepdim=True)
+                point_angle_reg_labels = (point_angle_reg_labels * point_angle_cls_labels).sum(dim=-1, keepdim=True)
+                point_loss_angle_reg = self.reg_loss_func(
+                    point_angle_reg_preds[None, ...],
+                    point_angle_reg_labels[None, ...],
+                    weights=reg_weights[None, ...]
                 )
-                point_loss_corner *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['point_corner_weight']
-                point_loss_box_aux = point_loss_box_aux + point_loss_corner
-            
-            point_loss_box[pos_mask] = point_loss_box[pos_mask] + point_loss_box_aux
+                point_loss_angle_reg = point_loss_angle_reg.squeeze()
 
-        return point_loss_box, reg_weights, tb_dict  # point_loss_box: (N)
+                point_loss_angle_cls *= loss_weights_dict['point_angle_cls_weight']
+                point_loss_angle_reg *= loss_weights_dict['point_angle_reg_weight']
+
+                point_loss_box = point_loss_offset_reg + point_loss_angle_cls + point_loss_angle_reg  # (N)
+            else:
+                point_angle_reg_preds = point_reg_preds[:, 6:]
+                point_angle_reg_labels = point_reg_labels[:, 6:]
+                point_loss_angle_reg = self.reg_loss_func(
+                    point_angle_reg_preds[None, ...],
+                    point_angle_reg_labels[None, ...],
+                    weights=reg_weights[None, ...]
+                )
+                point_loss_angle_reg *= loss_weights_dict['point_angle_reg_weight']
+                point_loss_box = point_loss_offset_reg + point_loss_angle_reg
+
+            if reg_weights.sum() > 0:
+                point_box_preds = self.forward_ret_dict['point_box_preds_list'][i]
+                point_box_labels = self.forward_ret_dict['point_box_labels_list'][i]
+                point_loss_box_aux = 0
+
+                if self.model_cfg.LOSS_CONFIG.get('AXIS_ALIGNED_IOU_LOSS_REGULARIZATION', False):
+                    point_loss_iou = self.get_axis_aligned_iou_loss_lidar(
+                        point_box_preds[pos_mask, :],
+                        point_box_labels[pos_mask, :]
+                    )
+                    point_loss_iou *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['point_iou_weight']
+                    point_loss_box_aux = point_loss_box_aux + point_loss_iou
+
+                if self.model_cfg.LOSS_CONFIG.get('CORNER_LOSS_REGULARIZATION', False):
+                    point_loss_corner = self.get_corner_loss_lidar(
+                        point_box_preds[pos_mask, 0:7],
+                        point_box_labels[pos_mask, 0:7]
+                    )
+                    point_loss_corner *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['point_corner_weight']
+                    point_loss_box_aux = point_loss_box_aux + point_loss_corner
+                
+                point_loss_box[pos_mask] = point_loss_box[pos_mask] + point_loss_box_aux
+                point_loss_box = point_loss_box.sum() / torch.clamp(reg_weights.sum(), min=1.0)
+                point_loss_box_all += point_loss_box
+        return point_loss_box_all, tb_dict  # point_loss_box: (N)
 
     def get_sasa_layer_loss(self, tb_dict=None):
         if self.enable_sasa:
@@ -710,118 +678,23 @@ class PointHeadVote(PointHeadTemplate):
         else:
             return None, None
 
-    def get_segmentation_loss(self, tb_dict=None):
-        x = self.forward_ret_dict['segmentation_preds']
-        target = self.forward_ret_dict['segmentation_label'].long()
-        # segmentation_loss = nn.functional.cross_entropy(x, target)
-        
-        # print('#', x.min(), x.max(), target.min(), target.max())
-        segmentation_loss = self.segmentation_loss_func(x, target)
-        # print("# seg loss", segmentation_loss)
-        if tb_dict is None:
-            tb_dict = {}
-        tb_dict.update({'segmentation_loss': segmentation_loss.item()})
-        return segmentation_loss, tb_dict
-
-    def get_fp_cls_layer_loss(self, tb_dict=None):
-        point_cls_labels = self.forward_ret_dict['fp_point_cls_labels'].view(-1)
-        point_cls_preds = self.forward_ret_dict['fp_point_cls_preds'].view(-1, self.num_class)
-
-        positives = (point_cls_labels > 0)
-        negative_cls_weights = (point_cls_labels == 0) * 1.0
-        cls_weights = (negative_cls_weights + 15.0 * positives).float()
-        pos_normalizer = positives.sum(dim=0).float()
-        cls_weights /= torch.clamp(pos_normalizer, min=1.0)
-
-        one_hot_targets = point_cls_preds.new_zeros(*list(point_cls_labels.shape), self.num_class + 1)
-        one_hot_targets.scatter_(-1, (point_cls_labels * (point_cls_labels >= 0).long()).unsqueeze(dim=-1).long(), 1.0)
-        one_hot_targets = one_hot_targets[..., 1:]
-        cls_loss_src = self.cls_loss_func(point_cls_preds, one_hot_targets, weights=cls_weights)
-        point_loss_cls = cls_loss_src.sum()
-
-        loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
-        # point_loss_cls = point_loss_cls * loss_weights_dict['point_cls_weight']
-        point_loss_cls = point_loss_cls * loss_weights_dict.get('fp_point_cls_weight', 1.0)
-        if tb_dict is None:
-            tb_dict = {}
-        tb_dict.update({
-            'fp_point_loss_cls': point_loss_cls.item(),
-            'fp_point_pos_num': pos_normalizer.item()
-        })
-        return point_loss_cls, tb_dict
-
-    def get_fp_ctr_layer_loss(self, tb_dict=None):
-        pos_mask = self.forward_ret_dict['fp_point_cls_labels'] > 0
-        pos_normalizer = max(1, (pos_mask > 0).sum().item())
-        point_ctr_labels = self.forward_ret_dict['fp_point_ctr_labels']
-        point_ctr_preds = self.forward_ret_dict['fp_point_ctr_preds']
-
-        reg_weights = pos_mask.float()
-        pos_normalizer = pos_mask.sum().float()
-        reg_weights /= torch.clamp(pos_normalizer, min=1.0)
-        point_loss_ctr_src = self.reg_loss_func(
-            point_ctr_preds[None, ...], point_ctr_labels[None, ...], weights=reg_weights[None, ...]
-        )
-        point_loss_ctr = point_loss_ctr_src.sum()
-
-        loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
-        point_loss_ctr = point_loss_ctr * loss_weights_dict.get('fp_point_part_weight', 1.0)
-        if tb_dict is None:
-            tb_dict = {}
-        tb_dict.update({'fp_point_loss_ctr': point_loss_ctr.item()})
-        return point_loss_ctr, tb_dict
-
-    def get_fp_part_image_layer_loss(self, tb_dict=None):
-        pos_mask = self.forward_ret_dict['fp_point_cls_labels'] > 0
-        pos_normalizer = max(1, (pos_mask > 0).sum().item())
-        point_part_labels = self.forward_ret_dict['fp_point_part_labels']
-        point_part_preds = self.forward_ret_dict['fp_point_part_image_preds']
-        # point_loss_part = F.binary_cross_entropy(torch.sigmoid(point_part_preds), point_part_labels, reduction='none')
-        # point_loss_part = (point_loss_part.sum(dim=-1) * pos_mask.float()).sum() / (3 * pos_normalizer)
-
-        reg_weights = pos_mask.float()
-        pos_normalizer = pos_mask.sum().float()
-        reg_weights /= torch.clamp(pos_normalizer, min=1.0)
-        point_loss_part_src = self.reg_loss_func(
-            point_part_preds[None, ...], point_part_labels[None, ...], weights=reg_weights[None, ...]
-        )
-        point_loss_part = point_loss_part_src.sum()
-
-        loss_weights_dict = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS
-        point_loss_part = point_loss_part * loss_weights_dict.get('fp_point_part_image_weight', 1.0)
-        if tb_dict is None:
-            tb_dict = {}
-        tb_dict.update({'fp_point_loss_part_image': point_loss_part.item()})
-        return point_loss_part, tb_dict
-
-
     def get_loss(self, tb_dict=None):
         tb_dict = {} if tb_dict is None else tb_dict
         point_loss_vote, tb_dict_0 = self.get_vote_layer_loss()
 
-        point_loss_cls, cls_weights, tb_dict_1 = self.get_cls_layer_loss()
-        point_loss_box, box_weights, tb_dict_2 = self.get_box_layer_loss()
-        segmentation_loss, tb_dict_seg = self.get_segmentation_loss()
-        fp_point_loss_cls, tb_dict_fp_cls = self.get_fp_cls_layer_loss()
-        fp_point_loss_part, tb_dict_fp_part = self.get_fp_ctr_layer_loss() # NOTE: it is center estimation loss.
-        fp_point_loss_part_image, tb_dict_fp_part_image = self.get_fp_part_image_layer_loss()
+        point_loss_cls, tb_dict_1 = self.get_cls_layer_loss()
+        point_loss_box, tb_dict_2 = self.get_box_layer_loss()
 
-        point_loss_cls = point_loss_cls.sum() / torch.clamp(cls_weights.sum(), min=1.0)
-        point_loss_box = point_loss_box.sum() / torch.clamp(box_weights.sum(), min=1.0)
         tb_dict.update({
             'point_loss_vote': point_loss_vote.item(),
-            'point_loss_cls': point_loss_cls.item(),
-            'point_loss_box': point_loss_box.item()
+            'point_loss_cls': point_loss_cls.item() if not isinstance(point_loss_cls, int) else point_loss_cls,
+            'point_loss_box': point_loss_box.item() if not isinstance(point_loss_box, int) else point_loss_box
         })
 
-        point_loss = point_loss_vote + point_loss_cls + point_loss_box + segmentation_loss + fp_point_loss_cls + fp_point_loss_part + fp_point_loss_part_image
+        point_loss = point_loss_vote + point_loss_cls + point_loss_box
         tb_dict.update(tb_dict_0)
         tb_dict.update(tb_dict_1)
         tb_dict.update(tb_dict_2)
-        tb_dict.update(tb_dict_seg)
-        tb_dict.update(tb_dict_fp_cls)
-        tb_dict.update(tb_dict_fp_part)
-        tb_dict.update(tb_dict_fp_part_image)
 
         point_loss_sasa, tb_dict_3 = self.get_sasa_layer_loss()
         if point_loss_sasa is not None:
@@ -844,52 +717,6 @@ class PointHeadVote(PointHeadTemplate):
                 point_part_offset: (N1 + N2 + N3 + ..., 3)
         """
         batch_size = batch_dict['batch_size']
-
-        fp_point_features = batch_dict['fp_point_features']
-        fp_point_image_features = batch_dict['fp_point_image_features']
-        fp_point_coords = batch_dict['fp_point_coords']
-        fp_batch_idx, fp_point_coords = fp_point_coords[:, 0], fp_point_coords[:, 1:4]
-        fp_point_coords = fp_point_coords.view(batch_size, -1, 3).contiguous()
-        # import pdb;pdb.set_trace()
-        fp_point_features = fp_point_features.reshape(
-            batch_size, fp_point_coords.size(1), -1
-        ).permute(0, 2, 1).contiguous()
-
-        # import pdb;pdb.set_trace()
-        if self.training:
-            fp_point_image_features = fp_point_image_features.reshape(
-                batch_size, fp_point_coords.size(1), -1
-            ).permute(0, 2, 1).contiguous() # (bs, c, n)
-        else:
-            _bs, _, _h, _w = batch_dict['segmentation_preds'].shape
-            fp_point_image_features = fp_point_image_features.reshape(
-                batch_size, _h*_w, -1
-            ).permute(0, 2, 1).contiguous() # (bs, c, hxw)
-
-
-        fp_point_cls_preds = self.fp_cls_layers(fp_point_features)  # (total_points, num_class)
-        fp_point_part_preds = self.fp_part_reg_layers(fp_point_features)
-        fp_point_part_image_preds = self.fp_part_reg_image_layers(fp_point_image_features)
-
-        fp_point_cls_preds = fp_point_cls_preds.permute(0, 2, 1).contiguous()
-        fp_point_cls_preds = fp_point_cls_preds.view(-1, fp_point_cls_preds.shape[-1]).contiguous()
-        fp_point_part_preds = fp_point_part_preds.permute(0, 2, 1).contiguous()
-        fp_point_part_preds = fp_point_part_preds.view(-1, fp_point_part_preds.shape[-1]).contiguous()
-        fp_point_part_image_preds = fp_point_part_image_preds.permute(0, 2, 1).contiguous()# (bs, n, 3)
-        fp_point_part_image_preds = fp_point_part_image_preds.view(-1, fp_point_part_image_preds.shape[-1]).contiguous()# (bs*n, 3)
-
-        if not self.training:
-            fp_point_part_image_preds = fp_point_part_image_preds.view(_bs,_h,_w,3)
-            fp_point_part_image_preds = fp_point_part_image_preds.permute(0,3,1,2).contiguous()
-            batch_dict['part_image_preds'] = fp_point_part_image_preds #(bs,3,h,w)
-
-
-        ret_dict = {
-            'batch_size': batch_size,
-            'fp_point_cls_preds': fp_point_cls_preds,
-            'fp_point_ctr_preds': fp_point_part_preds,
-            'fp_point_part_image_preds': fp_point_part_image_preds
-        }
 
         point_coords = batch_dict['point_coords']
         point_features = batch_dict['point_features']
@@ -918,11 +745,9 @@ class PointHeadVote(PointHeadTemplate):
         vote_offsets = torch.min(vote_offsets, vote_translation_range)
         vote_coords = candidate_coords + vote_offsets.permute(0, 2, 1).contiguous()
 
-        # ret_dict = {'batch_size': batch_size,
-        #             'point_candidate_coords': candidate_coords.view(-1, 3).contiguous(),
-        #             'point_vote_coords': vote_coords.view(-1, 3).contiguous()}
-        ret_dict['point_candidate_coords'] = candidate_coords.view(-1, 3).contiguous()
-        ret_dict['point_vote_coords'] = vote_coords.view(-1, 3).contiguous()
+        ret_dict = {'batch_size': batch_size,
+                    'point_candidate_coords': candidate_coords.view(-1, 3).contiguous(),
+                    'point_vote_coords': vote_coords.view(-1, 3).contiguous()}
 
         sample_batch_idx_flatten = sample_batch_idx.view(-1, 1).contiguous()  # (N, 1)
         batch_dict['batch_index'] = sample_batch_idx_flatten.squeeze(-1)
@@ -946,63 +771,203 @@ class PointHeadVote(PointHeadTemplate):
             new_xyz=vote_coords
         )
 
-        # import pdb;pdb.set_trace()
         point_features = self.shared_fc_layer(point_features)
-        point_cls_preds = self.cls_layers(point_features)
-        point_reg_preds = self.reg_layers(point_features)
+        ############  split #################
+        pred_dicts = []
+        point_cls_preds_list = []
+        point_reg_preds_list = []
+        point_box_preds_list = []
+        point_cls_scores_list = []
+        ret_dict['point_cls_labels_list'] = []
+        ret_dict['point_reg_labels_list'] = []
+        ret_dict['point_box_labels_list'] = []
+        for i in range(self.num_class):
+            pred_dict = {}
+            pred_dict['point_vote_coords'] = batch_dict['point_vote_coords']
 
-        point_cls_preds = point_cls_preds.permute(0, 2, 1).contiguous()
-        point_cls_preds = point_cls_preds.view(-1, point_cls_preds.shape[-1]).contiguous()
-        point_reg_preds = point_reg_preds.permute(0, 2, 1).contiguous()
-        point_reg_preds = point_reg_preds.view(-1, point_reg_preds.shape[-1]).contiguous()
+            # import pdb;pdb.set_trace()
 
-        point_cls_scores = torch.sigmoid(point_cls_preds)
-        batch_dict['point_cls_scores'] = point_cls_scores
+            all_gt_boxes = batch_dict['gt_boxes']
+            gt_this_class_list = [some[some[:, -1]==i+1, :].shape[0] for some in all_gt_boxes]
+            num_max_gt_this_class = max(gt_this_class_list)
+            # num_max_gt_this_class = all_gt_boxes.shape[1] # keep same for each in batch_size
+            gt_boxes_this_class = all_gt_boxes.new_zeros((batch_dict['batch_size'], num_max_gt_this_class, 8))
+            for j in range(batch_dict['batch_size']):
+                b_gt_boxes = all_gt_boxes[j]
+                gt_boxes_this_class[j][:gt_this_class_list[j]] = b_gt_boxes[b_gt_boxes[:, -1]==i+1, :]
+            pred_dict['gt_boxes'] = gt_boxes_this_class
+            # pred_dict['gt_boxes'] = batch_dict['gt_boxes']
 
-        point_box_preds = self.box_coder.decode_torch(point_reg_preds,
-                                                      ret_dict['point_vote_coords'])
-        batch_dict['point_box_preds'] = point_box_preds
+            point_cls_preds = self.__getattr__(f'cls_layer_{i}')(point_features)
+            point_reg_preds = self.__getattr__(f'reg_layer_{i}')(point_features)
 
-        ret_dict.update({'point_cls_preds': point_cls_preds,
-                         'point_reg_preds': point_reg_preds,
-                         'point_box_preds': point_box_preds,
-                         'point_cls_scores': point_cls_scores,
-                         'segmentation_preds': batch_dict['segmentation_preds']
-                         })
+            point_cls_preds = point_cls_preds.permute(0, 2, 1).contiguous()
+            point_cls_preds = point_cls_preds.view(-1, point_cls_preds.shape[-1]).contiguous()
+            point_reg_preds = point_reg_preds.permute(0, 2, 1).contiguous()
+            point_reg_preds = point_reg_preds.view(-1, point_reg_preds.shape[-1]).contiguous()
 
-        if self.training:
-            # get cls and part label for fp_points
-            targets_dict_fp = self.assign_targets_fp(batch_dict)
-            ret_dict['fp_point_cls_labels'] = targets_dict_fp['point_cls_labels']
-            ret_dict['fp_point_part_labels'] = targets_dict_fp['point_part_labels']
-            ret_dict['fp_point_ctr_labels'] = targets_dict_fp['point_ctr_labels']
+            point_cls_scores = torch.sigmoid(point_cls_preds)
+            # pred_dict['point_cls_scores'] = point_cls_scores
 
-            targets_dict = self.assign_targets(batch_dict)
-            ret_dict['point_cls_labels'] = targets_dict['point_cls_labels']
-            ret_dict['point_reg_labels'] = targets_dict['point_reg_labels']
-            ret_dict['point_box_labels'] = targets_dict['point_box_labels']
-            ret_dict['segmentation_label'] = targets_dict['segmentation_label']
+            point_box_preds = self.box_coder.decode_torch(point_reg_preds,
+                                                        ret_dict['point_vote_coords'])
+            # pred_dict['point_box_preds'] = point_box_preds
+            point_cls_preds_list.append(point_cls_preds)
+            point_reg_preds_list.append(point_reg_preds)
+            point_box_preds_list.append(point_box_preds)
+            point_cls_scores_list.append(point_cls_scores)
 
-            if self.enable_sasa:
-                point_sasa_labels = self.loss_point_sasa(
-                    batch_dict['point_coords_list'],
-                    batch_dict['point_scores_list'],
-                    batch_dict['gt_boxes']
-                )
-                ret_dict.update({
-                    'point_sasa_preds': batch_dict['point_scores_list'],
-                    'point_sasa_labels': point_sasa_labels
-                })
+            if self.training:
+                targets_dict = self.assign_targets(pred_dict)
+                ret_dict['point_cls_labels_list'].append(targets_dict['point_cls_labels'])
+                ret_dict['point_reg_labels_list'].append(targets_dict['point_reg_labels'])
+                ret_dict['point_box_labels_list'].append(targets_dict['point_box_labels'])
+
+                if self.enable_sasa:
+                    point_sasa_labels = self.loss_point_sasa(
+                        batch_dict['point_coords_list'],
+                        batch_dict['point_scores_list'],
+                        batch_dict['gt_boxes']
+                    )
+                    ret_dict.update({
+                        'point_sasa_preds': batch_dict['point_scores_list'],
+                        'point_sasa_labels': point_sasa_labels
+                    })
+
+        ret_dict.update({'point_cls_preds_list': point_cls_preds_list,
+                         'point_reg_preds_list': point_reg_preds_list,
+                         'point_box_preds_list': point_box_preds_list,
+                         'point_cls_scores_list': point_cls_scores_list})
+
 
         if not self.training or self.predict_boxes_when_training:
-            point_cls_preds, point_box_preds = self.generate_predicted_boxes(
+            pred_dicts = self.generate_predicted_boxes(
                 points=batch_dict['point_vote_coords'][:, 1:4],
-                point_cls_preds=point_cls_preds, point_box_preds=point_reg_preds
+                point_cls_preds_list=point_cls_preds_list, point_box_preds_list=point_reg_preds_list,
+                batch_dict=batch_dict
             )
-            batch_dict['batch_cls_preds'] = point_cls_preds
-            batch_dict['batch_box_preds'] = point_box_preds
-            batch_dict['cls_preds_normalized'] = False
+
+            # TODO
+            if self.predict_boxes_when_training:
+                rois, roi_scores, roi_labels = self.reorder_rois_for_refining(batch_dict['batch_size'], pred_dicts)
+                batch_dict['rois'] = rois
+                batch_dict['roi_scores'] = roi_scores
+                batch_dict['roi_labels'] = roi_labels
+                batch_dict['has_class_labels'] = True
+            else:
+                batch_dict['final_box_dicts'] = pred_dicts
 
         self.forward_ret_dict = ret_dict
 
         return batch_dict
+
+    def generate_predicted_boxes(self, points, point_cls_preds_list, point_box_preds_list, batch_dict):
+        """
+        Args:
+            points: (N, 3)
+            point_cls_preds: (N, num_class)
+            point_box_preds: (N, box_code_size)
+        Returns:
+            point_cls_preds: (N, num_class)
+            point_box_preds: (N, box_code_size)
+
+        """
+        # _, pred_classes = point_cls_preds.max(dim=-1)
+        # point_box_preds = self.box_coder.decode_torch(point_box_preds, points, pred_classes + 1)
+        post_process_cfg = self.model_cfg.POST_PROCESSING
+        batch_size = batch_dict['batch_size']
+        pred_dicts = [{
+            'pred_boxes': [],
+            'pred_scores': [],
+            'pred_labels': [],
+        } for k in range(batch_size)]
+
+        for class_idx in range(self.num_class):
+            for index in range(batch_size):
+                batch_box_preds = self.box_coder.decode_torch(point_box_preds_list[class_idx], points, None)
+
+                if batch_dict.get('batch_index', None) is not None:
+                    assert batch_box_preds.shape.__len__() == 2
+                    batch_mask = (batch_dict['batch_index'] == index)
+                else:
+                    assert batch_box_preds.shape.__len__() == 3
+                    batch_mask = index
+
+                box_preds = batch_box_preds[batch_mask]
+                src_box_preds = box_preds
+
+                # if not isinstance(batch_dict['batch_cls_preds'], list):
+                #     cls_preds = batch_dict['batch_cls_preds'][batch_mask]
+
+                #     src_cls_preds = cls_preds
+                #     assert cls_preds.shape[1] in [1, self.num_class]
+
+                #     if not batch_dict['cls_preds_normalized']:
+                #         cls_preds = torch.sigmoid(cls_preds)
+                # else:
+                cls_preds = point_cls_preds_list[class_idx][batch_mask]
+                src_cls_preds = cls_preds
+                if 'cls_preds_normalized' not in batch_dict or not batch_dict['cls_preds_normalized']:
+                    # cls_preds = [torch.sigmoid(x) for x in cls_preds]
+                    cls_preds = torch.sigmoid(cls_preds)
+
+                cls_preds = cls_preds.flatten()
+                #### class_agnostic_nms
+                # cls_preds, label_preds = torch.max(cls_preds, dim=-1)
+                label_preds = torch.ones_like(cls_preds, device=cls_preds.device).int() * class_idx
+                # import pdb;pdb.set_trace()
+                # if batch_dict.get('has_class_labels', False):
+                #     label_key = 'roi_labels' if 'roi_labels' in batch_dict else 'batch_pred_labels'
+                #     label_preds = batch_dict[label_key][index]
+                # else:
+                #     label_preds = label_preds + 1
+
+                if self.predict_boxes_when_training: # with roi
+                        selected, selected_scores = model_nms_utils.class_agnostic_nms(
+                            box_scores=cls_preds, box_preds=box_preds,
+                            nms_config=post_process_cfg.NMS_CONFIG['TRAIN' if self.training else 'TEST'],
+                            score_thresh=None
+                        )
+                else:
+                    selected, selected_scores = model_nms_utils.class_agnostic_nms(
+                        box_scores=cls_preds, box_preds=box_preds,
+                        nms_config=post_process_cfg.NMS_CONFIG,
+                        score_thresh=post_process_cfg.SCORE_THRESH
+                    )                    
+
+                # if post_process_cfg.OUTPUT_RAW_SCORE:
+                #     max_cls_preds, _ = torch.max(src_cls_preds, dim=-1)
+                #     selected_scores = max_cls_preds[selected]
+
+                final_scores = selected_scores
+                final_labels = label_preds[selected]
+                final_boxes = box_preds[selected]
+                pred_dicts[index]['pred_boxes'].append(final_boxes)
+                pred_dicts[index]['pred_scores'].append(final_scores)
+                pred_dicts[index]['pred_labels'].append(final_labels)
+
+        for k in range(batch_size):
+            pred_dicts[k]['pred_boxes'] = torch.cat(pred_dicts[k]['pred_boxes'], dim=0)
+            pred_dicts[k]['pred_scores'] = torch.cat(pred_dicts[k]['pred_scores'], dim=0)
+            pred_dicts[k]['pred_labels'] = torch.cat(pred_dicts[k]['pred_labels'], dim=0) + 1
+
+        return pred_dicts
+
+    @staticmethod
+    def reorder_rois_for_refining(batch_size, pred_dicts):
+        num_max_rois = max([len(cur_dict['pred_boxes']) for cur_dict in pred_dicts])
+        num_max_rois = max(1, num_max_rois)  # at least one faked rois to avoid error
+        pred_boxes = pred_dicts[0]['pred_boxes']
+
+        rois = pred_boxes.new_zeros((batch_size, num_max_rois, pred_boxes.shape[-1]))
+        roi_scores = pred_boxes.new_zeros((batch_size, num_max_rois))
+        roi_labels = pred_boxes.new_zeros((batch_size, num_max_rois)).long()
+
+        for bs_idx in range(batch_size):
+            num_boxes = len(pred_dicts[bs_idx]['pred_boxes'])
+
+            rois[bs_idx, :num_boxes, :] = pred_dicts[bs_idx]['pred_boxes']
+            roi_scores[bs_idx, :num_boxes] = pred_dicts[bs_idx]['pred_scores']
+            roi_labels[bs_idx, :num_boxes] = pred_dicts[bs_idx]['pred_labels']
+        return rois, roi_scores, roi_labels
+
