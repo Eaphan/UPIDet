@@ -2,7 +2,6 @@ import pickle
 import time
 
 import numpy as np
-import cv2
 import torch
 import tqdm
 
@@ -26,16 +25,14 @@ def mIoU(preds, labels, n_classes=3, return_list=True):
                 ious.append(np.nan)
             else:
                 iou = intersection / union
-                iou = iou.cpu().numpy()
-                ious.append(iou)
-        # miou = np.nanmean(ious)
-        # ious.append(miou)
-        batch_mIoUs.append(ious)
+                ious.append(iou.cpu().numpy())
+        # print("############# ious", ious)
+        miou = np.nanmean(ious)
+        batch_mIoUs.append(miou)
     if return_list:
         return batch_mIoUs
     else:
-        raise NotImplementedError
-        # return np.nanmean(batch_mIoUs)
+        return np.nanmean(batch_mIoUs)
 
 def statistics_info(cfg, ret_dict, metric, disp_dict):
     # for cur_thresh in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST:
@@ -87,32 +84,15 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         progress_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval', dynamic_ncols=True)
     start_time = time.time()
 
+    mIoU_list = []
     for i, batch_dict in enumerate(dataloader):
         load_data_to_gpu(batch_dict)
         with torch.no_grad():
-            _r = model(batch_dict)
-            if len(_r)==3:
-                pred_dicts, ret_dict, segmentation_preds = _r
+            if 'segmentation_label' in batch_dict:
+                pred_dicts, ret_dict, segmentation_preds = model(batch_dict)
             else:
-                pred_dicts, ret_dict = _r
-            # if 'segmentation_label' in batch_dict:
-            #     pred_dicts, ret_dict, segmentation_preds = model(batch_dict)
-            # else:
-            #     pred_dicts, ret_dict = model(batch_dict)
+                pred_dicts, ret_dict = model(batch_dict)
         disp_dict = {}
-
-        # ad hoc
-        if 'part_image_preds' in pred_dicts[0] and save_to_file:
-            # part_image_preds = pred_dicts['part_image_preds']
-            # bs = part_image_preds.shape[0]
-            for i in range(len(pred_dicts)):
-                part_image_preds = pred_dicts[i]['part_image_preds']
-                frame_id = batch_dict['frame_id'][i]
-                part_image_preds = np.transpose(part_image_preds * 255.0, (1, 2, 0)).astype(np.uint8)
-            part_image_output_dir = result_dir / 'part_image_preds'
-            part_image_output_dir.mkdir(parents=True, exist_ok=True)
-            filename = str(part_image_output_dir) + '/part_image_{}.png'.format(frame_id)
-            cv2.imwrite(filename, part_image_preds)
 
         statistics_info(cfg, ret_dict, metric, disp_dict)
         annos = dataset.generate_prediction_dicts(
@@ -120,6 +100,8 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             output_path=final_output_dir if save_to_file else None
         )
         det_annos += annos
+        # mIoU_list += mIoU(segmentation_preds, batch_dict['segmentation_label'], len(class_names)+1)
+
         if cfg.LOCAL_RANK == 0:
             progress_bar.set_postfix(disp_dict)
             progress_bar.update()
@@ -131,6 +113,7 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         rank, world_size = common_utils.get_dist_info()
         det_annos = common_utils.merge_results_dist(det_annos, len(dataset), tmpdir=result_dir / 'tmpdir')
         metric = common_utils.merge_results_dist([metric], world_size, tmpdir=result_dir / 'tmpdir')
+        mIoU_list = common_utils.merge_results_dist(mIoU_list, len(dataset), tmpdir=result_dir / 'tmpdir')
 
     logger.info('*************** Performance of EPOCH %s *****************' % epoch_id)
     sec_per_example = (time.time() - start_time) / len(dataloader.dataset)
@@ -156,13 +139,11 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         ret_dict['recall/rcnn_%s' % str(cur_thresh)] = cur_rcnn_recall
     
     # print customized statistics
-    if dist_test:
-        if hasattr(model.module, 'disp_recall_record'):
-            model.module.disp_recall_record(metric, logger, sample_num=len(dataloader.dataset))
-    else:
-        if hasattr(model, 'disp_recall_record'):
-            model.disp_recall_record(metric, logger, sample_num=len(dataloader.dataset))
+    if hasattr(model, 'disp_recall_record'):
+        model.disp_recall_record(metric, logger, sample_num=len(dataloader.dataset))
 
+    total_mIoU = np.nanmean(mIoU_list)
+    logger.info(f"The mIoU = {total_mIoU}")
 
     total_pred_objects = 0
     for anno in det_annos:

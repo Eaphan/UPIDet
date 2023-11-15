@@ -510,7 +510,7 @@ class GroupAll(nn.Module):
 
 
 class Conv2dBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='lrelu'):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='relu'):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
         
@@ -523,14 +523,13 @@ class Conv2dBlock(nn.Module):
         elif norm == 'adap':
             self.norm = AdaptiveInstanceNorm2d(out_channels)
         else:
-            self.norm = None
-            #raise NotImplementedError
+            raise NotImplementedError
 
         # initialize activation
         if activation == 'relu':
             self.activation = nn.ReLU()
         elif activation == 'lrelu':
-            self.activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+            self.activation = nn.LeakyReLU()
         elif activation == 'prelu':
             self.activation = nn.PReLU()
         elif activation == 'selu':
@@ -540,13 +539,12 @@ class Conv2dBlock(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
-        if self.norm is not None:
-            x = self.norm(x)
+        x = self.norm(x)
         x = self.activation(x)
         return x
 
 class Conv1dBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='lrelu'):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1, norm='bn', activation='relu'):
         super().__init__()
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups)
         if norm == 'bn':
@@ -564,7 +562,7 @@ class Conv1dBlock(nn.Module):
         if activation == 'relu':
             self.activation = nn.ReLU()
         elif activation == 'lrelu':
-            self.activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+            self.activation = nn.LeakyReLU()
         elif activation == 'prelu':
             self.activation = nn.PReLU()
         elif activation == 'selu':

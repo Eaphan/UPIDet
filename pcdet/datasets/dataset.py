@@ -124,7 +124,7 @@ class DatasetTemplate(torch_data.Dataset):
             assert 'gt_boxes' in data_dict, 'gt_boxes should be provided for training'
             gt_boxes_mask = np.array([n in self.class_names for n in data_dict['gt_names']], dtype=np.bool_)
 
-            calib = data_dict['calib']
+            # calib = data_dict['calib']
             points_before_aug = copy.deepcopy(data_dict['points'])
             data_dict['points_before_aug'] = points_before_aug
             data_dict['num_original_point'] = len(points_before_aug)
@@ -134,15 +134,10 @@ class DatasetTemplate(torch_data.Dataset):
                     'gt_boxes_mask': gt_boxes_mask
                 }
             )
-            data_dict['calib'] = calib
+            # data_dict['calib'] = calib
             points_after_aug = copy.deepcopy(data_dict['points'])
             points_before_aug = data_dict['points_before_aug']
-        else:
-            # ad hoc, can add param
-            points_num = len(data_dict['points'])
-            visible_mask = np.ones([points_num, 1])
-            data_dict['points'] = np.concatenate([data_dict['points'], visible_mask], axis=1)
-
+        
         # import pdb;pdb.set_trace()
 
         if data_dict.get('gt_boxes', None) is not None:
@@ -244,7 +239,7 @@ class DatasetTemplate(torch_data.Dataset):
 
                         images.append(image_pad)
                     ret[key] = np.stack(images, axis=0)
-                elif key in ['calib']:
+                elif key in ['calib', 'image_shape_0','image_shape_1', 'image_shape_2', 'image_shape_3', 'image_shape_4']: # 'P0','P1', 'P2', 'P3', 'P4', 'V2R_0','V2R_1', 'V2R_2', 'V2R_3', 'V2R_4'
                     ret[key] = val
 
                 elif key in ["points_2d"]:
@@ -264,7 +259,7 @@ class DatasetTemplate(torch_data.Dataset):
                 else:
                     ret[key] = np.stack(val, axis=0)
             except:
-                print('Error in collate_batch: key=%s' % key)
+                print('Error in collate_batch: key=%s' % key, val)
                 raise TypeError
 
         ret['batch_size'] = batch_size

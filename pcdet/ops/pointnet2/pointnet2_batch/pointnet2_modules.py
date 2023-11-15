@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from .pointnet2_utils import Conv1dBlock, Conv2dBlock 
 from . import pointnet2_utils
+from pcdet.ops.k_nearest_neighbor.k_nearest_neighbor_utils import k_nearest_neighbor
 from pcdet.utils import common_utils
 
 
@@ -739,18 +740,19 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
 
     def forward(self,
                 xyz: torch.Tensor,
-                features: torch.Tensor = None,
-                vis: torch.Tensor = None,
-                image_features: torch.Tensor = None,
+                features: torch.Tensor,
+                image_features_list=None,
                 new_xyz=None,
                 scores=None,
                 world_scale=None,
                 world_rotation=None,
                 flip_along_x=None,
-                V2R=None,
-                P2=None,
-                image_shape=None,
-                images=None
+                flip_along_y=None,
+                V2R_list=None,
+                P_list=None,
+                image_shape_list=None,
+                images_list=None,
+                fuse_mask=True
                 ):
         """
         :param xyz: (B, N, 3) tensor of the xyz coordinates of the features
@@ -764,7 +766,7 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
         new_features_list = []
 
         xyz_flipped = xyz.transpose(1, 2).contiguous()
-        vis_flipped = vis.transpose(1, 2).contiguous()
+        # vis_flipped = vis.transpose(1, 2).contiguous()
         
         if new_xyz is None:
             assert len(self.npoint_list) == len(self.sample_range_list) == len(self.sample_method_list)
@@ -799,11 +801,10 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
                 xyz_flipped,
                 sample_idx
             ).transpose(1, 2).contiguous()  # (B, npoint, 3)
-            # import pdb;pdb.set_trace()
-            new_vis = pointnet2_utils.gather_operation(
-                vis_flipped,
-                sample_idx
-            ).transpose(1, 2).contiguous()  # (B, npoint, 3)
+            # new_vis = pointnet2_utils.gather_operation(
+            #     vis_flipped,
+            #     sample_idx
+            # ).transpose(1, 2).contiguous()  # (B, npoint, 3)
             
             if self.skip_connection: 
                 old_features = pointnet2_utils.gather_operation(
@@ -839,15 +840,14 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
             new_features = self.aggregation_mlp(new_features)
 
         # fuse point features and image features
-        if image_features is not None:
+        if fuse_mask:
             batch_size = new_features.shape[0]
             point_image_features_list = []
-            image_point_features_list = []
-            uv_list = []
+            # uv_list = []
+            uv_list_list = [[] for i in range(batch_size)] # bs then camera_idx
+            depth_list_list = [[] for i in range(batch_size)] # bs then camera_idx
 
-            batch_size, _, image_features_h, image_features_w = image_features.shape
-            
-            # import pdb;pdb.set_trace()
+            # batch_size, _, image_features_h, image_features_w = image_features.shape
             for bs_idx in range(batch_size):
                 keypoints_b = new_xyz[bs_idx].clone()
                 # if self.training:
@@ -862,62 +862,92 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
                     flip_along_x_b = flip_along_x[bs_idx] # ad hoc, only process flip_x
                     if flip_along_x_b:
                         keypoints_b[:, 1] = -keypoints_b[:, 1]
+                if flip_along_y is not None:
+                    flip_along_y_b = flip_along_y[bs_idx] # ad hoc, only process flip_y
+                    if flip_along_y_b:
+                        keypoints_b[:, 0] = -keypoints_b[:, 0]
 
-                # project keypoint to image
-                keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
-                scan_C0 = torch.mm(keypoints_b_hom, V2R[bs_idx].T)
-                scan_C2 = torch.mm(scan_C0, P2[bs_idx].T) # [N, 3]
-                scan_C2_depth = scan_C2[:, 2]
-                scan_C2 = (scan_C2[:, :2].T / scan_C2[:, 2]).T
+                cur_point_image_features_clist = []
+                for camera_idx in range(5):
+                    # project keypoint to image
+                    keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
+                    scan_C0 = torch.mm(keypoints_b_hom, V2R_list[camera_idx][bs_idx].T)
+                    scan_C2 = torch.mm(scan_C0, P_list[camera_idx][bs_idx].T) # [N, 3]
+                    scan_C2_depth = scan_C2[:, 2]
+                    scan_C2 = (scan_C2[:, :2].T / scan_C2[:, 2]).T
+                    image_shape = image_shape_list[camera_idx][bs_idx]
 
-                # save debug images
-                # import matplotlib.pyplot as plt
-                # import numpy as np
-                # _scan_C2 = scan_C2.cpu().numpy();_scan_C2_depth = scan_C2_depth.cpu().numpy()
-                # img = images[bs_idx][:3].permute(1,2,0).cpu().numpy()
-                # fig = plt.figure(figsize=(12, 6));plt.imshow(img)
-                # inds = _scan_C2[:, 0] > 0;inds = np.logical_and(inds, _scan_C2[:, 0] < img.shape[1]);inds = np.logical_and(inds, _scan_C2[:, 1] > 0);inds = np.logical_and(inds, _scan_C2[:, 1] < img.shape[0]);inds = np.logical_and(inds, _scan_C2_depth > 0)
-                # plt.scatter(_scan_C2[inds, 0], _scan_C2[inds, 1], c=-_scan_C2_depth[inds], alpha=1, s=2, cmap='viridis')
-                # plt.axis('off');plt.tight_layout();plt.savefig('output.png', bbox_inches='tight')
-                # import pdb;pdb.set_trace()
+                    # import matplotlib.pyplot as plt
+                    # import numpy as np
+                    # _scan_C2 = scan_C2.cpu().numpy();_scan_C2_depth = scan_C2_depth.cpu().numpy()
+                    # img = images_list[camera_idx][bs_idx][:3].permute(1,2,0).cpu().numpy()
+                    # _scan_C2[:, 0] *= (img.shape[1]/image_shape[1]) # w
+                    # _scan_C2[:, 1] *= (img.shape[0]/image_shape[0]) # h
+                    # fig = plt.figure(figsize=(12, 6));plt.imshow(img)
+                    # # inds = _scan_C2[:, 0] > 0;inds = np.logical_and(inds, _scan_C2[:, 0] < img.shape[1]); inds = np.logical_and(inds, _scan_C2[:, 1] > 0);inds = np.logical_and(inds, _scan_C2[:, 1] < img.shape[0]);inds = np.logical_and(inds, _scan_C2_depth > 0)
+                    # inds = _scan_C2[:, 0] > 0;inds = np.logical_and(inds, _scan_C2[:, 0] < img.shape[1]); 
+                    # inds = np.logical_and(inds, _scan_C2[:, 1] > 0);inds = np.logical_and(inds, _scan_C2[:, 1] < img.shape[0]);
+                    # inds = np.logical_and(inds, _scan_C2_depth > 0)
 
-                scan_C2[:, 0] *= (image_features[bs_idx].shape[2]/image_shape[1]) # w
-                scan_C2[:, 1] *= (image_features[bs_idx].shape[1]/image_shape[0]) # h
-                uv_list.append(scan_C2)
+                    # plt.scatter(_scan_C2[inds, 0], _scan_C2[inds, 1], c=-_scan_C2_depth[inds], alpha=1, s=2, cmap='viridis')
+                    # plt.axis('off');plt.tight_layout();plt.savefig(f'output_c{camera_idx}.png', bbox_inches='tight')
+                    
 
-                # cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[:, 0], scan_C2[:, 1])
-                cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
-                valid_mask = new_vis[bs_idx].flatten()
-                cur_point_image_features = torch.zeros((len(valid_mask), cur_image_features.shape[-1]), dtype=cur_image_features.dtype, device=cur_image_features.device)
-                valid_cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[valid_mask==1, 0], scan_C2[valid_mask==1, 1])
-                cur_point_image_features[valid_mask==1, :] = valid_cur_point_image_features
-                point_image_features_list.append(cur_point_image_features)
+                    image_features = image_features_list[camera_idx]
+                    # image_shape = image_shape_list[camera_idx]
+                    scan_C2[:, 0] *= (image_features[bs_idx].shape[2]/image_shape[1]) # w
+                    scan_C2[:, 1] *= (image_features[bs_idx].shape[1]/image_shape[0]) # h
+                    uv_list_list[bs_idx].append(scan_C2)
+                    depth_list_list[bs_idx].append(scan_C2_depth)
 
-            feat_3d_to_2d_list = []
-            for bs_idx in range(batch_size):
-                bs_uv = uv_list[bs_idx]
-                bs_uv_grid = torch.floor(bs_uv).int()
-                valid_point_mask = (bs_uv[:, 0]>=0) & (bs_uv[:, 0]<image_features[0].shape[2]) & (bs_uv[:, 1]>=0) & (bs_uv[:, 1]<image_features[0].shape[1])
+                    cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
+                    # valid_mask = new_vis[bs_idx].flatten() 
+                    valid_mask = (scan_C2_depth >0 ) & (scan_C2[:, 0]>=0) & (scan_C2[:, 0]<image_features[0].shape[2]) & (scan_C2[:, 1]>=0) & (scan_C2[:, 1]<image_features[0].shape[1])
 
-                # import pdb;pdb.set_trace()
-                valid_point_mask = valid_point_mask & (new_vis[bs_idx]>0).flatten()
+                    cur_point_image_features = torch.zeros((len(valid_mask), cur_image_features.shape[-1]), dtype=cur_image_features.dtype, device=cur_image_features.device)
+                    valid_cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[valid_mask==1, 0], scan_C2[valid_mask==1, 1])
+                    cur_point_image_features[valid_mask==1, :] = valid_cur_point_image_features
+                    cur_point_image_features_clist.append(cur_point_image_features)
 
-                bs_uv_grid = bs_uv_grid[valid_point_mask].transpose(0,1)
-                bs_new_features = new_features[bs_idx].transpose(0,1)[valid_point_mask, :]
-                mask_value = torch.ones([bs_new_features.shape[0],1], device=bs_new_features.device)
+                # avg by valid camera count
+                feats = torch.stack(cur_point_image_features_clist, dim=0)
+                non_zero_mask = feats != 0
+                weights = non_zero_mask.float()
+                weighted_sum = torch.sum(feats * weights, dim=0)
+                weighted_image_features = weighted_sum / (torch.sum(weights, dim=0) + 1e-6)
+                point_image_features_list.append(weighted_image_features)
 
-                gather_3d_features = torch.sparse_coo_tensor(bs_uv_grid, bs_new_features, (image_features_w, image_features_h, new_features.shape[1]))
-                gather_3d_features = gather_3d_features.to_dense()
-                gather_counts = torch.sparse_coo_tensor(bs_uv_grid, mask_value, (image_features_w, image_features_h, 1))
-                gather_counts = gather_counts.to_dense()
-                bs_feat_3d_to_2d = gather_3d_features / (gather_counts + 1e-6) # (w,h,c)
-                feat_3d_to_2d_list.append(bs_feat_3d_to_2d)
 
-            feat_3d_to_2d = torch.stack(feat_3d_to_2d_list).permute(0,3,2,1)            
+            new_image_features_list = []
+            for camera_idx in range(5):
+                image_features = image_features_list[camera_idx]
+                _, _, image_features_h, image_features_w = image_features.shape
+                feat_3d_to_2d_list = []
+                for bs_idx in range(batch_size):
+                    bs_uv = uv_list_list[bs_idx][camera_idx]
+                    bs_depth = depth_list_list[bs_idx][camera_idx]
+                    bs_uv_grid = torch.floor(bs_uv).int()
+                    valid_point_mask = (bs_depth>0) & (bs_uv[:, 0]>=0) & (bs_uv[:, 0]<image_features[0].shape[2]) & (bs_uv[:, 1]>=0) & (bs_uv[:, 1]<image_features[0].shape[1])
 
-            feat_3d_to_2d = self.fuse2d_mlp(feat_3d_to_2d)
-            new_image_features = self.fuse2d_conv(torch.cat([feat_3d_to_2d, image_features], dim=1))
-            
+                    # print(f"### {camera_idx}  valid_point_mask {valid_point_mask.sum()}")
+
+                    bs_uv_grid = bs_uv_grid[valid_point_mask].transpose(0,1)
+                    bs_new_features = new_features[bs_idx].transpose(0,1)[valid_point_mask, :]
+                    mask_value = torch.ones([bs_new_features.shape[0],1], device=bs_new_features.device)
+
+                    gather_3d_features = torch.sparse_coo_tensor(bs_uv_grid, bs_new_features, (image_features_w, image_features_h, new_features.shape[1]))
+                    gather_3d_features = gather_3d_features.to_dense()
+                    gather_counts = torch.sparse_coo_tensor(bs_uv_grid, mask_value, (image_features_w, image_features_h, 1))
+                    gather_counts = gather_counts.to_dense()
+                    bs_feat_3d_to_2d = gather_3d_features / (gather_counts + 1e-6) # (w,h,c)
+                    feat_3d_to_2d_list.append(bs_feat_3d_to_2d)
+
+                feat_3d_to_2d = torch.stack(feat_3d_to_2d_list).permute(0,3,2,1)            
+
+                feat_3d_to_2d = self.fuse2d_mlp(feat_3d_to_2d)
+                new_image_features = self.fuse2d_conv(torch.cat([feat_3d_to_2d, image_features], dim=1))
+                new_image_features_list.append(new_image_features)
+
             # 2d to 3d
             feat_2d_to_3d = torch.stack(point_image_features_list).permute(0,2,1)
             feat_2d_to_3d = self.fuse3d_before_mlps(feat_2d_to_3d)
@@ -925,12 +955,15 @@ class PointnetSAModuleFSMSGWithImage(PointnetSAModuleFSMSG):
             new_features = torch.cat([new_features, feat_2d_to_3d], dim=1)
             new_features = self.fuse3d_mlp(new_features)
 
+        else:
+            new_image_features_list = image_features_list
+
         if self.confidence_mlp is not None:
             new_scores = self.confidence_mlp(new_features)
             new_scores = new_scores.squeeze(1)  # (B, npoint)
-            return new_xyz, new_features, new_vis, new_scores, new_image_features
+            return new_xyz, new_features, new_scores, new_image_features_list
 
-        return new_xyz, new_features, new_vis, None, new_image_features
+        return new_xyz, new_features, None, new_image_features_list
 
 
 class PointnetSAModuleFS(PointnetSAModuleFSMSG):
@@ -1038,8 +1071,8 @@ class PointnetFPModuleWithImage(nn.Module):
         shared_mlps = []
         for k in range(len(mlp) - 1):
             shared_mlps.extend([
-                nn.Conv1d(mlp[k], mlp[k + 1], kernel_size=1, bias=False),
-                nn.BatchNorm1d(mlp[k + 1]),
+                nn.Conv2d(mlp[k], mlp[k + 1], kernel_size=1, bias=False),
+                nn.BatchNorm2d(mlp[k + 1]),
                 nn.ReLU()
             ])
         self.mlp = nn.Sequential(*shared_mlps)
@@ -1072,14 +1105,15 @@ class PointnetFPModuleWithImage(nn.Module):
                 known: torch.Tensor,
                 unknow_feats: torch.Tensor,
                 known_feats: torch.Tensor,
-                image_features: torch.Tensor,
-                new_vis: torch.Tensor,
+                image_features_list: torch.Tensor=None,
+                # new_vis: torch.Tensor,
                 world_scale=None,
                 world_rotation=None,
                 flip_along_x=None,
-                V2R=None,
-                P2=None,
-                image_shape=None
+                flip_along_y=None,
+                V2R_list=None,
+                P_list=None,
+                image_shape_list=None
     ) -> torch.Tensor:
         """
         :param unknown: (B, n, 3) tensor of the xyz positions of the unknown features
@@ -1104,19 +1138,20 @@ class PointnetFPModuleWithImage(nn.Module):
         else:
             new_features = interpolated_feats
 
-        # new_features = new_features.unsqueeze(-1)
-        new_features = self.mlp(new_features)
+        new_features = new_features.unsqueeze(-1)
+        new_features = self.mlp(new_features).squeeze(-1)
 
         # fuse point features and image features
         new_xyz = unknown
         xyz = known
-        if image_features is not None:
+        if image_features_list is not None:
             batch_size = new_features.shape[0]
             point_image_features_list = []
             image_point_features_list = []
-            uv_list = []
+            uv_list_list = [[] for i in range(batch_size)] # bs then camera_idx
+            depth_list_list = [[] for i in range(batch_size)] # bs then camera_idx
 
-            batch_size, _, image_features_h, image_features_w = image_features.shape
+            # batch_size, _, image_features_h, image_features_w = image_features.shape
             
             # import pdb;pdb.set_trace()
             for bs_idx in range(batch_size):
@@ -1134,61 +1169,69 @@ class PointnetFPModuleWithImage(nn.Module):
                     if flip_along_x_b:
                         keypoints_b[:, 1] = -keypoints_b[:, 1]
 
-                # project keypoint to image
-                keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
-                scan_C0 = torch.mm(keypoints_b_hom, V2R[bs_idx].T)
-                scan_C2 = torch.mm(scan_C0, P2[bs_idx].T) # [N, 3]
-                scan_C2_depth = scan_C2[:, 2]
-                scan_C2 = (scan_C2[:, :2].T / scan_C2[:, 2]).T
+                cur_point_image_features_clist = []
+                for camera_idx in range(5):
+                    # project keypoint to image
+                    keypoints_b_hom = torch.cat([keypoints_b, keypoints_b.new_ones(len(keypoints_b),1)], dim=-1)
+                    scan_C0 = torch.mm(keypoints_b_hom, V2R_list[camera_idx][bs_idx].T)
+                    scan_C2 = torch.mm(scan_C0, P_list[camera_idx][bs_idx].T) # [N, 3]
+                    scan_C2_depth = scan_C2[:, 2]
+                    scan_C2 = (scan_C2[:, :2].T / scan_C2[:, 2]).T
 
-                # save debug images
-                # import matplotlib.pyplot as plt
-                # import numpy as np
-                # _scan_C2 = scan_C2.cpu().numpy();_scan_C2_depth = scan_C2_depth.cpu().numpy()
-                # img = images[bs_idx][:3].permute(1,2,0).cpu().numpy()
-                # fig = plt.figure(figsize=(12, 6));plt.imshow(img)
-                # inds = _scan_C2[:, 0] > 0;inds = np.logical_and(inds, _scan_C2[:, 0] < img.shape[1]);inds = np.logical_and(inds, _scan_C2[:, 1] > 0);inds = np.logical_and(inds, _scan_C2[:, 1] < img.shape[0]);inds = np.logical_and(inds, _scan_C2_depth > 0)
-                # plt.scatter(_scan_C2[inds, 0], _scan_C2[inds, 1], c=-_scan_C2_depth[inds], alpha=1, s=2, cmap='viridis')
-                # plt.axis('off');plt.tight_layout();plt.savefig('output.png', bbox_inches='tight')
-                # import pdb;pdb.set_trace()
+                    image_features = image_features_list[camera_idx]
+                    image_shape = image_shape_list[camera_idx][bs_idx]
+                    scan_C2[:, 0] *= (image_features[bs_idx].shape[2]/image_shape[1]) # w
+                    scan_C2[:, 1] *= (image_features[bs_idx].shape[1]/image_shape[0]) # h
+                    uv_list_list[bs_idx].append(scan_C2)
+                    depth_list_list[bs_idx].append(scan_C2_depth)
 
-                scan_C2[:, 0] *= (image_features[bs_idx].shape[2]/image_shape[1]) # w
-                scan_C2[:, 1] *= (image_features[bs_idx].shape[1]/image_shape[0]) # h
-                uv_list.append(scan_C2)
+                    cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
+                    # valid_mask = new_vis[bs_idx].flatten() 
+                    valid_mask = (scan_C2_depth >0 ) & (scan_C2[:, 0]>=0) & (scan_C2[:, 0]<image_features[0].shape[2]) & (scan_C2[:, 1]>=0) & (scan_C2[:, 1]<image_features[0].shape[1])
 
-                cur_image_features = image_features[bs_idx].permute(1, 2, 0)  # (C,H,W) -> (H, W, C)
-                valid_mask = new_vis[bs_idx].flatten() 
-                cur_point_image_features = torch.zeros((len(valid_mask), cur_image_features.shape[-1]), dtype=cur_image_features.dtype, device=cur_image_features.device)
-                valid_cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[valid_mask==1, 0], scan_C2[valid_mask==1, 1])
-                cur_point_image_features[valid_mask==1, :] = valid_cur_point_image_features
-                point_image_features_list.append(cur_point_image_features)
+                    # print(f"FP ### {camera_idx}  valid_point_mask {valid_mask.sum()}")
 
-            feat_3d_to_2d_list = []
-            for bs_idx in range(batch_size):
-                bs_uv = uv_list[bs_idx]
-                bs_uv_grid = torch.floor(bs_uv).int()
-                valid_point_mask = (bs_uv[:, 0]>=0) & (bs_uv[:, 0]<image_features[0].shape[2]) & (bs_uv[:, 1]>=0) & (bs_uv[:, 1]<image_features[0].shape[1])
+                    cur_point_image_features = torch.zeros((len(valid_mask), cur_image_features.shape[-1]), dtype=cur_image_features.dtype, device=cur_image_features.device)
+                    valid_cur_point_image_features = common_utils.bilinear_interpolate_torch(cur_image_features, scan_C2[valid_mask==1, 0], scan_C2[valid_mask==1, 1])
+                    cur_point_image_features[valid_mask==1, :] = valid_cur_point_image_features
+                    cur_point_image_features_clist.append(cur_point_image_features)
 
-                # import pdb;pdb.set_trace()
-                valid_point_mask = valid_point_mask & (new_vis[bs_idx]>0).flatten()
+                # avg by valid camera count
+                feats = torch.stack(cur_point_image_features_clist, dim=0)
+                non_zero_mask = feats != 0
+                weights = non_zero_mask.float()
+                weighted_sum = torch.sum(feats * weights, dim=0)
+                weighted_image_features = weighted_sum / (torch.sum(weights, dim=0) + 1e-6)
+                point_image_features_list.append(weighted_image_features)
 
-                bs_uv_grid = bs_uv_grid[valid_point_mask].transpose(0,1)
-                bs_new_features = new_features[bs_idx].transpose(0,1)[valid_point_mask, :]
-                mask_value = torch.ones([bs_new_features.shape[0],1], device=bs_new_features.device)
+            new_image_features_list = []
+            for camera_idx in range(5):
+                image_features = image_features_list[camera_idx]
+                _, _, image_features_h, image_features_w = image_features.shape
+                feat_3d_to_2d_list = []
+                for bs_idx in range(batch_size):
+                    bs_uv = uv_list_list[bs_idx][camera_idx]
+                    bs_depth = depth_list_list[bs_idx][camera_idx]
+                    bs_uv_grid = torch.floor(bs_uv).int()
+                    valid_point_mask = (bs_depth>0) & (bs_uv[:, 0]>=0) & (bs_uv[:, 0]<image_features[0].shape[2]) & (bs_uv[:, 1]>=0) & (bs_uv[:, 1]<image_features[0].shape[1])
 
-                gather_3d_features = torch.sparse_coo_tensor(bs_uv_grid, bs_new_features, (image_features_w, image_features_h, new_features.shape[1]))
-                gather_3d_features = gather_3d_features.to_dense()
-                gather_counts = torch.sparse_coo_tensor(bs_uv_grid, mask_value, (image_features_w, image_features_h, 1))
-                gather_counts = gather_counts.to_dense()
-                bs_feat_3d_to_2d = gather_3d_features / (gather_counts + 1e-6) # (w,h,c)
-                feat_3d_to_2d_list.append(bs_feat_3d_to_2d)
+                    bs_uv_grid = bs_uv_grid[valid_point_mask].transpose(0,1)
+                    bs_new_features = new_features[bs_idx].transpose(0,1)[valid_point_mask, :]
+                    mask_value = torch.ones([bs_new_features.shape[0],1], device=bs_new_features.device)
 
-            feat_3d_to_2d = torch.stack(feat_3d_to_2d_list).permute(0,3,2,1)
+                    gather_3d_features = torch.sparse_coo_tensor(bs_uv_grid, bs_new_features, (image_features_w, image_features_h, new_features.shape[1]))
+                    gather_3d_features = gather_3d_features.to_dense()
+                    gather_counts = torch.sparse_coo_tensor(bs_uv_grid, mask_value, (image_features_w, image_features_h, 1))
+                    gather_counts = gather_counts.to_dense()
+                    bs_feat_3d_to_2d = gather_3d_features / (gather_counts + 1e-6) # (w,h,c)
+                    feat_3d_to_2d_list.append(bs_feat_3d_to_2d)
 
-            feat_3d_to_2d = self.fuse2d_mlp(feat_3d_to_2d)
-            # import pdb;pdb.set_trace()
-            new_image_features = self.fuse2d_conv(torch.cat([feat_3d_to_2d, image_features], dim=1))
-            
+                feat_3d_to_2d = torch.stack(feat_3d_to_2d_list).permute(0,3,2,1)            
+
+                feat_3d_to_2d = self.fuse2d_mlp(feat_3d_to_2d)
+                new_image_features = self.fuse2d_conv(torch.cat([feat_3d_to_2d, image_features], dim=1))
+                new_image_features_list.append(new_image_features)
+
             # 2d to 3d
             feat_2d_to_3d = torch.stack(point_image_features_list).permute(0,2,1)
             feat_2d_to_3d = self.fuse3d_before_mlps(feat_2d_to_3d)
@@ -1196,8 +1239,7 @@ class PointnetFPModuleWithImage(nn.Module):
             new_features = torch.cat([new_features, feat_2d_to_3d], dim=1)
             new_features = self.fuse3d_mlp(new_features)
 
-
-        return new_features, new_image_features
+        return new_features, new_image_features_list
 
 if __name__ == "__main__":
     pass

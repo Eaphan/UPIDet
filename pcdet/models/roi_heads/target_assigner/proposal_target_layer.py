@@ -103,8 +103,12 @@ class ProposalTargetLayer(nn.Module):
             else:
                 iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt[:, 0:7])  # (M, N)
                 max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
+            try:
+                sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
+            except:
+                print('### cur_gt', cur_gt, cur_gt.shape, batch_dict['frame_id'])
+                print('### cur_roi', cur_roi, cur_roi.shape)
 
-            sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
 
             batch_rois[index] = cur_roi[sampled_inds]
             batch_roi_labels[index] = cur_roi_labels[sampled_inds]
@@ -154,7 +158,7 @@ class ProposalTargetLayer(nn.Module):
                 hard_bg_inds, easy_bg_inds, bg_rois_per_this_image, self.roi_sampler_cfg.HARD_BG_RATIO
             )
         else:
-            print('maxoverlaps:(min=%f, max=%f)' % (max_overlaps.min().item(), max_overlaps.max().item()))
+            print('maxoverlaps:(min=%f, max=%f)' % (max_overlaps.min().item(), max_overlaps.max().item()), max_overlaps.shape, max_overlaps)
             print('ERROR: FG=%d, BG=%d' % (fg_num_rois, bg_num_rois))
             raise NotImplementedError
 

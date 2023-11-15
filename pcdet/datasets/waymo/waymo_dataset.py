@@ -10,6 +10,8 @@ import numpy as np
 import torch
 import multiprocessing
 import SharedArray
+from skimage import io
+import cv2
 import torch.distributed as dist
 from tqdm import tqdm
 from pathlib import Path
@@ -191,6 +193,36 @@ class WaymoDataset(DatasetTemplate):
             'points': points,
             'frame_id': info['frame_id'],
         }
+
+        # TODO 
+        # ad hoc, get image & calib
+        lidar_file = self.data_path / sequence_name / ('%04d.npy' % sample_idx)
+        # self.root_path / self.dataset_cfg.PROCESSED_DATA_TAG
+        calib_file = self.root_path / 'kitti_format/calib' / sequence_name / ('%04d.txt' % sample_idx)
+        with open(calib_file,'r') as f:
+            calib = f.readlines()
+        R0_rect = np.array([float(x) for x in calib[5].strip('\n').split(' ')[1:]]).reshape(3,3)
+        # Add a 1 in bottom-right, reshape to 4 x 4
+        R0_rect = np.insert(R0_rect,3,values=[0,0,0],axis=0)
+        R0_rect = np.insert(R0_rect,3,values=[0,0,0,1],axis=1)
+        for camera_index in range(5):
+            # input_dict[f'P{camera_index}']
+            input_dict[f'P{camera_index}'] = np.array([float(x) for x in calib[camera_index].strip('\n').split(' ')[1:]]).reshape(3,4)
+            Tr_velo_to_cam = np.array([float(x) for x in calib[6+camera_index].strip('\n').split(' ')[1:]]).reshape(3,4)
+            Tr_velo_to_cam = np.insert(Tr_velo_to_cam,3,values=[0,0,0,1],axis=0)
+            input_dict[f'V2R_{camera_index}'] = R0_rect @ Tr_velo_to_cam
+
+            image_file = self.root_path / 'kitti_format/image_{}'.format(camera_index) / sequence_name / ('%04d.jpg' % sample_idx)
+            assert image_file.exists()
+            image = io.imread(image_file)
+            image = image.astype(np.float32)
+            input_dict[f'image_shape_{camera_index}'] = image.shape[:2] # (h,w)
+            image = image.transpose((2, 0, 1)) # hwc -> chw
+            image /= 255.0
+            # image = transform.resize(image, (image.shape[1]//2, image.shape[2]//2))
+            image = cv2.resize(image.transpose((1, 2, 0)), (image.shape[2]//2, image.shape[1]//2), interpolation=cv2.INTER_AREA)
+            image = image.transpose((2, 0, 1)) # HWC -> CHW
+            input_dict[f'image_{camera_index}'] = image
 
         if 'annos' in info:
             annos = info['annos']

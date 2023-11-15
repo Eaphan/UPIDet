@@ -20,23 +20,21 @@ class PDVHead(RoIHeadTemplate):
 
         c_out = 0
         self.roi_grid_pool_layers = nn.ModuleList()
-        # for i, src_name in enumerate(self.pool_cfg.FEATURE_LOCATIONS):
-        i = 0
-        mlps = layer_cfg.MLPS
-        for k in range(len(mlps)):
-            mlps[k] = [self.model_cfg.ROI_GRID_POOL.NUM_FEATURES[i]] + mlps[k]
-        stack_sa_module_msg = StackSAModuleMSGAttention if self.pool_cfg.get('ATTENTION', {}).get('ENABLED') else StackSAModuleMSG
-        pool_layer = stack_sa_module_msg(
-            radii=layer_cfg.POOL_RADIUS,
-            nsamples=layer_cfg.NSAMPLE,
-            mlps=mlps,
-            use_xyz=True,
-            pool_method=layer_cfg.POOL_METHOD,
-            use_density=layer_cfg.get('USE_DENSITY')
-        )
-
-        self.roi_grid_pool_layers.append(pool_layer)
-        c_out += sum([x[-1] for x in mlps])
+        for i, src_name in enumerate(self.pool_cfg.FEATURE_LOCATIONS):
+            mlps = layer_cfg[src_name].MLPS
+            for k in range(len(mlps)):
+                mlps[k] = [self.model_cfg.ROI_GRID_POOL.NUM_FEATURES[i]] + mlps[k]
+            stack_sa_module_msg = StackSAModuleMSGAttention if self.pool_cfg.get('ATTENTION', {}).get('ENABLED') else StackSAModuleMSG
+            pool_layer = stack_sa_module_msg(
+                radii=layer_cfg[src_name].POOL_RADIUS,
+                nsamples=layer_cfg[src_name].NSAMPLE,
+                mlps=mlps,
+                use_xyz=True,
+                pool_method=layer_cfg[src_name].POOL_METHOD,
+                use_density=layer_cfg[src_name].get('USE_DENSITY')
+            )
+            self.roi_grid_pool_layers.append(pool_layer)
+            c_out += sum([x[-1] for x in mlps])
 
         if self.pool_cfg.get('ATTENTION', {}).get('ENABLED'):
             assert self.pool_cfg.ATTENTION.NUM_FEATURES == c_out, f'ATTENTION.NUM_FEATURES must equal voxel aggregation output dimension of {c_out}.'
@@ -134,47 +132,51 @@ class PDVHead(RoIHeadTemplate):
         pooled_features_list = []
         ball_idxs_list = []
 
-        # for k, src_name in enumerate(self.pool_cfg.FEATURE_LOCATIONS):
-        k = 0
-        # point_coords = batch_dict['point_coords'][src_name]
-        # point_features = batch_dict['point_features'][src_name]
-        point_coords = batch_dict['fp_point_coords']
-        point_features = batch_dict['fp_point_features']
+        all_batch_idx = batch_dict['points'][:, 0]
+        all_batch_idx = all_batch_idx.view(batch_size, -1).float()
+        for k, src_name in enumerate(self.pool_cfg.FEATURE_LOCATIONS):
+            index = int(src_name.split("_")[2])
+            l_xyz = batch_dict['l_xyz']
 
-        pool_layer = self.roi_grid_pool_layers[k]
+            point_features = batch_dict['l_features'][index].permute(0, 2, 1).contiguous()
+            point_features = point_features.view(-1, point_features.shape[-1])
+            point_coords = torch.cat((all_batch_idx[:, :l_xyz[index].size(1)].reshape(-1, 1).float(),
+                                     l_xyz[index].view(-1, 3)), dim=1)
 
-        xyz = point_coords[:, 1:4]
-        xyz_batch_cnt = xyz.new_zeros(batch_size).int()
-        batch_idx = point_coords[:, 0]
-        for k in range(batch_size):
-            xyz_batch_cnt[k] = (batch_idx == k).sum()
+            pool_layer = self.roi_grid_pool_layers[k]
 
-        new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
-        pool_output = pool_layer(
-            xyz=xyz.contiguous(),
-            xyz_batch_cnt=xyz_batch_cnt,
-            new_xyz=new_xyz,
-            new_xyz_batch_cnt=new_xyz_batch_cnt,
-            features=point_features.contiguous(),
-        )  # (M1 + M2 ..., C)
+            xyz = point_coords[:, 1:4]
+            xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+            batch_idx = point_coords[:, 0]
+            for k in range(batch_size):
+                xyz_batch_cnt[k] = (batch_idx == k).sum()
 
-        if self.pool_cfg.get('ATTENTION', {}).get('ENABLED'):
-            _, pooled_features, ball_idxs = pool_output
-        else:
-            _, pooled_features = pool_output
+            new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
+            pool_output = pool_layer(
+                xyz=xyz.contiguous(),
+                xyz_batch_cnt=xyz_batch_cnt,
+                new_xyz=new_xyz,
+                new_xyz_batch_cnt=new_xyz_batch_cnt,
+                features=point_features.contiguous(),
+            )  # (M1 + M2 ..., C)
 
-        pooled_features = pooled_features.view(
-            -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
-            pooled_features.shape[-1]
-        )  # (BxN, 6x6x6, C)
-        pooled_features_list.append(pooled_features)
+            if self.pool_cfg.get('ATTENTION', {}).get('ENABLED'):
+                _, pooled_features, ball_idxs = pool_output
+            else:
+                _, pooled_features = pool_output
 
-        if self.pool_cfg.get('ATTENTION', {}).get('ENABLED'):
-            ball_idxs = ball_idxs.view(
-                -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE **3,
-                ball_idxs.shape[-1]
-            )
-            ball_idxs_list.append(ball_idxs)
+            pooled_features = pooled_features.view(
+                -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
+                pooled_features.shape[-1]
+            )  # (BxN, 6x6x6, C)
+            pooled_features_list.append(pooled_features)
+
+            if self.pool_cfg.get('ATTENTION', {}).get('ENABLED'):
+                ball_idxs = ball_idxs.view(
+                    -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE **3,
+                    ball_idxs.shape[-1]
+                )
+                ball_idxs_list.append(ball_idxs)
 
         all_pooled_features = torch.cat(pooled_features_list, dim=-1)
         if self.pool_cfg.get('ATTENTION', {}).get('ENABLED'):
@@ -237,7 +239,7 @@ class PDVHead(RoIHeadTemplate):
         :return:
         """
         # batch_dict['point_features'], batch_dict['point_coords'] = self.get_point_voxel_features(batch_dict)
-        batch_dict['point_features'], batch_dict['point_coords'] = batch_dict['fp_point_features'], batch_dict['fp_point_coords']
+        # batch_dict['point_features'], batch_dict['point_coords'] = batch_dict['fp_point_features'], batch_dict['fp_point_coords']
 
         targets_dict = self.proposal_layer(
             batch_dict, nms_config=self.model_cfg.NMS_CONFIG['TRAIN' if self.training else 'TEST']

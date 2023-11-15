@@ -24,8 +24,8 @@ class Point3DSSD(Detector3DTemplate):
             }
             return ret_dict, tb_dict, disp_dict
         else:
-            pred_dicts, recall_dicts, segmentation_preds = self.post_processing(batch_dict)
-            return pred_dicts, recall_dicts, segmentation_preds
+            pred_dicts, recall_dicts = self.post_processing(batch_dict)
+            return pred_dicts, recall_dicts
 
     def get_training_loss(self):
         disp_dict = {}
@@ -208,7 +208,7 @@ class Point3DSSD(Detector3DTemplate):
             cur_recall_point_cls = metric['recall_point_vote' + '[%s]' % self.class_names[cur_cls]] / max(gt_num_cls[cur_cls], 1)
             logger.info('\t- ' + self.class_names[cur_cls] + ': %f' % cur_recall_point_cls)
 
-    def post_processing(self, batch_dict):
+    def post_processing1(self, batch_dict):
         """
         Args:
             batch_dict:
@@ -287,11 +287,6 @@ class Point3DSSD(Detector3DTemplate):
                     label_preds = batch_dict[label_key][index]
                 else:
                     label_preds = label_preds + 1
-                # if self.num_class > 1:
-                #     # ad hoc, set the score_thresh of car as 0.5
-                #     car_low_score_mask = (label_preds==1) & (cls_preds<0.5)
-                #     cls_preds[car_low_score_mask] = 0
-
                 selected, selected_scores = model_nms_utils.class_agnostic_nms(
                     box_scores=cls_preds, box_preds=box_preds,
                     nms_config=post_process_cfg.NMS_CONFIG,
@@ -312,17 +307,39 @@ class Point3DSSD(Detector3DTemplate):
                     thresh_list=post_process_cfg.RECALL_THRESH_LIST
                 )
 
-            part_image_preds = batch_dict['part_image_preds'][index].cpu().numpy()
-            cur_segmentation_preds = batch_dict['segmentation_preds'][index].cpu().numpy()
-            cur_segmentation_preds = cur_segmentation_preds.argmax(0)
-            cur_segmentation_preds = maskUtils.encode(np.asfortranarray(cur_segmentation_preds.astype(np.uint8)))
+            # cur_segmentation_preds = batch_dict['segmentation_preds'][index].cpu().numpy()
+            # cur_segmentation_preds = cur_segmentation_preds.argmax(0)
+            # cur_segmentation_preds = maskUtils.encode(np.asfortranarray(cur_segmentation_preds.astype(np.uint8)))
+
             record_dict = {
                 'pred_boxes': final_boxes,
                 'pred_scores': final_scores,
                 'pred_labels': final_labels,
-                'segmentation_preds': cur_segmentation_preds,
-                'part_image_preds': part_image_preds
+                # 'segmentation_preds': cur_segmentation_preds
             }
             pred_dicts.append(record_dict)
 
-        return pred_dicts, recall_dict, batch_dict['segmentation_preds']
+        return pred_dicts, recall_dict
+
+    def post_processing2(self, batch_dict):
+        # single-stage
+        post_process_cfg = self.model_cfg.POST_PROCESSING
+        batch_size = batch_dict['batch_size']
+        final_pred_dict = batch_dict['final_box_dicts']
+        recall_dict = {}
+        for index in range(batch_size):
+            pred_boxes = final_pred_dict[index]['pred_boxes']
+
+            recall_dict = self.generate_recall_record(
+                box_preds=pred_boxes,
+                recall_dict=recall_dict, batch_index=index, data_dict=batch_dict,
+                thresh_list=post_process_cfg.RECALL_THRESH_LIST
+            )
+
+        return final_pred_dict, recall_dict
+
+    def post_processing(self, batch_dict):
+        if self.model_cfg.get('ROI_HEAD', False):
+            return self.post_processing1(batch_dict)
+        else:
+            return self.post_processing2(batch_dict)
