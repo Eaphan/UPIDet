@@ -26,6 +26,7 @@ Here we present the 3D detection performance of moderate difficulty on the *val*
 
 * The pre-trained model is trained with 4 NVIDIA 3090Ti GPUs and are available for download.
 * The training time is measured with 4 NVIDIA 3090Ti GPUs and PyTorch 1.8.
+* We could not provide the above pretrained models due to Waymo Dataset License Agreement, but you could easily achieve similar performance by training with the default configs.
 
 |                                             | training time | Car@R40 | Pedestrian@R40 | Cyclist@R40   | download |
 |---------------------------------------------|:----------:|:-------:|:-------:|:-------:|:---------:|
@@ -57,6 +58,55 @@ python -m pcdet.datasets.kitti.kitti_dataset create_kitti_infos tools/cfgs/datas
 ```
 Especially, for the 2D auxiliary task of semantic segmentation, we used the instance segmentation annotations as provided in [KINS dataset](https://github.com/qqlu/Amodal-Instance-Segmentation-through-KINS-Dataset). We incorporate mask of instance segmentation in kitti_infos_train/val.pkl and kitti_dbinfos_train.pkl. Please download them in this [link](https://drive.google.com/drive/folders/1cyFt9MqHnKK620IKbRuTN6SiEvJP6r8d?usp=sharing) and replace the original files.
 
+### Prepare Waymo Open Dataset
+* Please download the official [Waymo Open Dataset](https://waymo.com/open/download/)(v1.2.0), 
+including the training data `training_0000.tar~training_0031.tar` and the validation 
+data `validation_0000.tar~validation_0007.tar`.
+* Unzip all the above `xxxx.tar` files to the directory of `data/waymo/raw_data` as follows (You could get 798 *train* tfrecord and 202 *val* tfrecord ):  
+```
+GLENet
+├── data
+│   ├── waymo
+│   │   │── ImageSets
+│   │   │── kitti_format
+│   │   │   │── calib
+│   │   │   │── image_0
+│   │   │   │── image_1
+│   │   │   │── image_2
+│   │   │   │── image_3
+|   |   |   |── image_4
+|   |   |   |   │── segment-xxxxxxxx_with_camera_labels
+|   |   |   |   |   │── 0000.jpg  0001.jpg  0002.jpg ...
+|   |   |   |   |── ...
+│   │   │── raw_data
+│   │   │   │── segment-xxxxxxxx.tfrecord
+|   |   |   |── ...
+|   |   |── waymo_processed_data_v0_5_0
+│   │   │   │── segment-xxxxxxxx/
+|   |   |   |── ...
+│   │   │── waymo_processed_data_v0_5_0_gt_database_train_sampled_1/
+│   │   │── waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_1.pkl
+│   │   │── waymo_processed_data_v0_5_0_gt_database_train_sampled_1_global.npy (optional)
+│   │   │── waymo_processed_data_v0_5_0_infos_train.pkl (optional)
+│   │   │── waymo_processed_data_v0_5_0_infos_val.pkl (optional)
+
+```
+* You should use mmdet3d to generate RGB images for waymo dataset. Then you can link the image files to  the kitti_format directory using modified script tools/map_mmdet_waymo_image.py.
+
+* Install the official `waymo-open-dataset` by running the following command: 
+```shell script
+pip3 install --upgrade pip
+# tf 2.0.0
+pip3 install waymo-open-dataset-tf-2-5-0 --user
+```
+
+* Extract point cloud data from tfrecord and generate data infos by running the following command (it takes several hours, 
+and you could refer to `data/waymo/waymo_processed_data_v0_5_0` to see how many records that have been processed): 
+```python 
+python -m pcdet.datasets.waymo.waymo_dataset --func create_waymo_infos \
+    --cfg_file tools/cfgs/dataset_configs/waymo_dataset.yaml
+```
+
 ### Training
 ```
 cd tools;
@@ -68,6 +118,9 @@ Multi gpu training, assuming you have 4 gpus:
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/dist_train.sh 4 --cfg_file ./cfgs/kitti_models/upidet.yaml
 
 ```
+
+**Note**: For the waymo dataset, you should checkout branch "waymo_lidar" to train the single-modal detector, then checkout branch "waymo" to train the cross-modal detector based on the weights of obtained single-modal detector.
+
 ### Testing
 ```
 cd tools/
