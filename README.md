@@ -158,11 +158,12 @@ We sincerely appreciate the following open-source projects for providing valuabl
 ## Citation
 If you find this work useful in your research, please consider cite:
 ```
-@inproceedings{
-    zhang2023upidet,
-    title={Unleash the Potential of Image Branch for Cross-modal 3D Object Detection},
-    author={Yifan Zhang and Qijian Zhang and Junhui Hou and Yixuan Yuan and Guoliang Xing},
-    booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-    year={2023},
+@inproceedings{zhang2024unleash,
+    title={Unleash the potential of image branch for cross-modal 3d object detection},
+    author={Zhang, Yifan and Zhang, Qijian and Hou, Junhui and Yuan, Yixuan and Xing, Guoliang},
+    booktitle={Advances in Neural Information Processing Systems},
+    volume={36},
+    pages={51562--51583},
+    year={2023}
 }
 ```
